@@ -31,11 +31,11 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use std::{env, fs, slice, str};
 
-struct DevEnvArgs {
-    transport: Transport,
+pub(crate) struct DevEnvArgs {
+    pub(crate) transport: Transport,
     /// `nix develop`'s `-j`, `--cores` and the rest; the defaults natively.
-    options: worker::Options,
-    gc_root: GcRoot,
+    pub(crate) options: worker::Options,
+    pub(crate) gc_root: GcRoot,
 }
 
 /// Where the root of a shell's environment goes. A caller that named a path
@@ -61,7 +61,7 @@ impl GcRoot {
     }
 
     /// Points this run's root at `out_path`.
-    fn register(
+    pub(crate) fn register(
         &self,
         transport: &Transport,
         out_path: &str,
@@ -388,7 +388,7 @@ pub struct DevEnv {
     /// `<store path>/bin/bash`: the bash the shell was built with.
     pub builder: String,
     /// When the daemon phase started, for the caller's `--timings` line.
-    t1: Instant,
+    pub(crate) t1: Instant,
     /// The tracing-cache entry of this run, for `api::watch::watch_paths`;
     /// `None` without the cache.
     pub entry: Option<PathBuf>,
@@ -445,7 +445,7 @@ pub fn dev_env(
 /// What a `develop` entry holds is the `-env` output and the shell's builder,
 /// neither of which can hold a newline. The environment itself stays in the
 /// output: an output that is gone is a miss, and the run builds it again.
-fn remembered_env(result: &[u8]) -> Option<DevEnv> {
+pub(crate) fn remembered_env(result: &[u8]) -> Option<DevEnv> {
     let text = str::from_utf8(result).ok()?;
     let (out_path, builder) = text.split_once('\n')?;
     let env = BuildEnvironment::parse(&fs::read(out_path).ok()?).ok()?;
@@ -558,6 +558,19 @@ fn dev_env_build(ev: &mut Evaluator, a: EvalArgs, d: &DevEnvArgs) -> Result<DevE
     if let Err(e) = r {
         return Err(report(ev, &e));
     }
+    dev_env_of_roots(ev, &f, &roots, d, timings, t0)
+}
+
+/// [`dev_env_build`] after the evaluation: `roots` are the derivations the
+/// shell `f` evaluated to, and there must be one.
+pub(crate) fn dev_env_of_roots(
+    ev: &mut Evaluator,
+    f: &str,
+    roots: &[(StorePath, Option<String>)],
+    d: &DevEnvArgs,
+    timings: bool,
+    t0: Instant,
+) -> Result<DevEnv, i32> {
     if roots.len() != 1 {
         let msg = format!(
             "'{f}' needs to evaluate to a single derivation, but it evaluated to {} derivations",

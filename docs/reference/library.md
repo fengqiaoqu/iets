@@ -48,6 +48,8 @@ because a word made up from bits would let a safe call read any address.
 | What to watch for an answer to go stale | `api::watch::watch_paths(entry)` over an entry path, giving `Watched { path, kind }` capped at `api::watch::MAX` |
 | A shell's environment | `api::shell_env::shell_env(config, args, transport, options, gc_root)`: `args.input` is a flake, or an expression or a file with `args.attr` naming the shell. It builds the `-env` derivation through the daemon that `transport` names, reports an error to the session log and returns the exit code |
 | Flake references | `api::flake_ref`, `api::flake::{is_flake_ref, parse_attr_path, select, outputs, info, tree}`; `crate::flake` is private |
+| Builtins of your own | `api::host::HostBuiltin::new(name, arity, f)`, then `EvalConfig::host_builtin` ("Host builtins") |
+| Many attributes of one root | `api::resident::Resident::start(session, config, root)`, then `eval_json(attr)` or `shell_env(attr, …)` ("One evaluator for many answers") |
 
 ## What the host owns
 
@@ -186,3 +188,46 @@ The header has nothing for the string context except
 keeps: `Opaque`, `DrvDeep`, `Built` and `Impure`. `Impure` is the marker
 that a path coercion or the metadata of a source tree leaves, and
 `builtins.getContext` does not show it.
+
+## Host builtins
+
+A host adds a builtin with a Rust closure. It is called through the value
+API, so it never sees a `runtime::Word`:
+
+```rust
+use iets::api::host::HostBuiltin;
+
+let double = HostBuiltin::new("double", 1, |e, args| {
+    let n = e.force(args[0]).map_err(|err| err.msg.clone())?;
+    Ok(e.int(n.as_int().ok_or("expected an integer")? * 2))
+});
+let mut ev = EvalConfig::new().host_builtin(double).build();
+// builtins.double 21 == 42
+```
+
+- The builtin is `builtins.<name>`, not a global. A host builtin with the
+  name of a builtin replaces it, so give yours a prefix that Nix will not
+  take.
+- It gets exactly `arity` arguments, at least one, none of them forced.
+  An `Err(msg)` is an evaluation error at the call site,
+  `builtins.<name>: msg`.
+- The tracing cache cannot see inside the closure. Read files through
+  `Eval::read_file`, which records them as the evaluation's own reads.
+  Anything else the result depends on needs `HostBuiltin::key(bytes)`,
+  which goes into every cache key, or `HostBuiltin::impure()`, which stops
+  a run that calls the builtin from writing an entry.
+- The names, arities and keys of the host builtins are part of every cache
+  key, so a run without them never reads an entry made with them.
+
+## One evaluator for many answers
+
+`api::resident::Resident` keeps one evaluator on a thread of its own. It
+evaluates the root expression on first use and then serves attributes of
+it, one request at a time. A host that reads many attributes of one large
+value, such as a module system, evaluates it once.
+
+Each answer is a tracing-cache entry, keyed on the root and the attribute,
+and it is checked before the evaluator is touched. The entry holds every
+observation the evaluator made so far, not only those the answer needed.
+It can miss more often than a fresh run's entry would, but never hit when
+it should miss.

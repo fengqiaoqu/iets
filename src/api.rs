@@ -9,8 +9,10 @@ pub mod build;
 pub mod drvshow;
 pub mod fetch;
 pub mod flake;
+pub mod host;
 pub mod installable;
 pub mod render;
+pub mod resident;
 pub mod run;
 pub mod shell_env;
 
@@ -464,6 +466,10 @@ pub fn setup_cache_more(
         if let Some(root) = project_root(a) {
             k.field("project-root", &root);
         }
+    }
+    // a host builtin's answer is not in the read set
+    if !cfg.host_builtins().is_empty() {
+        k.field("host-builtins", &host::cache_key(cfg.host_builtins()));
     }
     // the read set holds the file this names, but not the fact that another
     // run read another file under the same command

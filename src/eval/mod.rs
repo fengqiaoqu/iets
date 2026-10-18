@@ -17,6 +17,7 @@ use std::{fs, mem, ptr};
 
 pub use error::{Error, ErrorKind, EvalResult, Pos};
 
+use crate::api::host::HostBuiltin;
 use crate::builtins::derivation::DrvState;
 use crate::builtins::{self, store_hooks};
 use crate::compile::cache::{self, IrCache};
@@ -294,6 +295,8 @@ pub struct Evaluator {
     /// A field, not a thread-local lookup, because the fan-out checks read
     /// it on the hot path (docs/reference/library.md).
     session: Arc<Session>,
+    /// `EvalConfig::host_builtin`, indexed by `api::host::call`.
+    pub(crate) host: Arc<Vec<HostBuiltin>>,
 }
 
 /// A position in a record, `file:line:column`, the way an error names one.
@@ -414,6 +417,7 @@ pub struct EvalConfig {
     dump_dir: Option<PathBuf>,
     trace: bool,
     trace_store: Option<store::Store>,
+    host: Vec<HostBuiltin>,
 }
 
 impl Default for EvalConfig {
@@ -432,6 +436,7 @@ impl Default for EvalConfig {
             dump_dir: None,
             trace: false,
             trace_store: None,
+            host: Vec::new(),
         }
     }
 }
@@ -470,6 +475,19 @@ impl EvalConfig {
 
     /// A host that keeps one session per evaluator needs no thread-local
     /// at all (docs/reference/library.md).
+    /// Adds `builtins.<name>` for `h` (`api::host`). A host builtin with
+    /// the name of a builtin replaces it.
+    pub fn host_builtin(mut self, h: HostBuiltin) -> EvalConfig {
+        self.host.retain(|o| o.name != h.name);
+        self.host.push(h);
+        self
+    }
+
+    /// The host builtins, for the cache key.
+    pub(crate) fn host_builtins(&self) -> &[HostBuiltin] {
+        &self.host
+    }
+
     pub fn session(mut self, session: Arc<Session>) -> EvalConfig {
         self.session = session;
         self
@@ -615,6 +633,7 @@ impl EvalConfig {
             pure: self.pure,
             project_root: self.project_root,
             session: self.session,
+            host: Arc::new(self.host),
         };
         builtins::install(&mut ev);
         if ev.session.profile.on() {

@@ -133,6 +133,18 @@ pub fn install(ev: &mut Evaluator) {
         let gsym = ev.sym(name.as_bytes());
         ev.globals.table.insert(gsym, *w);
     }
+    // one primop per host builtin, its first argument bound to the index of
+    // the closure; only `builtins` has them, never the globals
+    let host = ev.host.clone();
+    for (i, h) in host.iter().enumerate() {
+        let bsym = ev.sym(h.name.as_bytes());
+        let op = ev
+            .arena
+            .mk_primop(h.name, h.arity + 1, crate::api::host::call, bsym);
+        let bound = ev.arena.mk_thunk_app(op, Word::imm_int(i as i64));
+        entries.retain(|(s, _, _)| *s != bsym);
+        entries.push((bsym, Pos::NONE, bound));
+    }
     let derivation_sym = ev.sym(b"derivation");
     let builtins_sym = ev.sym(b"builtins");
     entries.push((derivation_sym, Pos::NONE, Word::NULL));

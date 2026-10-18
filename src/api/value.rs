@@ -89,6 +89,14 @@ impl Debug for Value<'_> {
 }
 
 impl<'e> Value<'e> {
+    pub(crate) fn of(w: Word) -> Value<'e> {
+        val(w)
+    }
+
+    pub(crate) fn word(self) -> Word {
+        self.w
+    }
+
     /// The forced view, or `None` while the value is still a thunk.
     #[inline]
     fn view(self) -> Option<View> {
@@ -323,6 +331,25 @@ impl<'e> Eval<'e> {
             .map(|(n, v)| (self.ev.sym(n), Pos::NONE, v.w))
             .collect();
         self.ev.mk_attrs(&mut es, Pos::NONE).map(val)
+    }
+
+    /// The bytes of the file at `path`, recorded in the tracing cache like a
+    /// file the evaluation reads itself: an entry is valid only while the
+    /// file is the same, and while a missing file stays missing.
+    pub fn read_file(&mut self, path: &[u8]) -> std::io::Result<Vec<u8>> {
+        let p = crate::sys::path_from_internal(path);
+        match std::fs::metadata(&p) {
+            Ok(meta) => {
+                let bytes = std::fs::read(&p)?;
+                self.ev.trace().file(path, &meta, &bytes);
+                Ok(bytes)
+            }
+            missing @ Err(_) => {
+                let kind = crate::trace::Kind::of(&missing);
+                self.ev.trace().stat(path, true, kind);
+                missing.map(|_| Vec::new())
+            }
+        }
     }
 }
 

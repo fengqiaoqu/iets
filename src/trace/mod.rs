@@ -375,6 +375,16 @@ impl Trace {
             .is_some_and(|i| !i.uncacheable.load(Ordering::Relaxed))
     }
 
+    /// [`Trace::take`] that leaves the observations in place, deduplicated,
+    /// for an evaluator that answers several questions in turn.
+    pub fn snapshot(&self) -> Vec<Obs> {
+        let obs = self.take();
+        if let Some(i) = &self.0 {
+            i.obs.lock().unwrap().extend(obs.iter().cloned());
+        }
+        obs
+    }
+
     /// Every observation, deduplicated on (kind, subject); two observations
     /// of one subject with different values are both kept.
     pub fn take(&self) -> Vec<Obs> {

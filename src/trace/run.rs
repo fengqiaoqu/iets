@@ -150,6 +150,17 @@ impl Cache {
     /// `currentTime` or called a fetcher writes nothing. `tables` adds the
     /// drv and source tables, which only a `build` hit reads back.
     pub fn write(&self, ev: &Evaluator, result: &[u8], tables: bool) {
+        self.write_obs(ev, result, tables, false);
+    }
+
+    /// [`Cache::write`] for an evaluator that goes on to answer more: the
+    /// entry holds every observation so far, a superset of what `result`
+    /// read, and the trace keeps them for the next entry.
+    pub fn write_kept(&self, ev: &Evaluator, result: &[u8]) {
+        self.write_obs(ev, result, false, true);
+    }
+
+    fn write_obs(&self, ev: &Evaluator, result: &[u8], tables: bool, keep: bool) {
         if !ev.trace().is_cacheable() {
             if self.timings {
                 errln!("cache: not written (uncacheable run)");
@@ -157,7 +168,11 @@ impl Cache {
             return;
         }
         let t0 = Instant::now();
-        let obs = ev.trace().take();
+        let obs = if keep {
+            ev.trace().snapshot()
+        } else {
+            ev.trace().take()
+        };
         let mut warnings = Vec::new();
         for w in ev.lints.records() {
             warnings.extend_from_slice(w.as_bytes());
