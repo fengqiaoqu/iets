@@ -389,6 +389,9 @@ pub struct DevEnv {
     pub builder: String,
     /// When the daemon phase started, for the caller's `--timings` line.
     t1: Instant,
+    /// The tracing-cache entry of this run, for `api::watch::watch_paths`;
+    /// `None` without the cache.
+    pub entry: Option<PathBuf>,
 }
 
 /// `print-dev-env` without the printing: the build environment of the flake installable
@@ -411,18 +414,23 @@ pub fn dev_env(
     if matches!(d.transport, crate::remote::worker::Transport::Unix(_)) {
         run = run.cached(&a, "develop");
     }
+    let entry = run.cache.as_ref().map(|c| c.entry_path());
     if let Some(env) = run.hit(|c| {
         let env = remembered_env(&c.part(Part::Result)?)?;
         c.replay_warnings();
         Some(env)
     }) {
+        let env = DevEnv { entry, ..env };
         return match d.gc_root.register(&d.transport, &env.out_path, None) {
             Ok(()) => Ok(env),
             Err(e) => Err(e.report()),
         };
     }
     cli::run_parallel(run, move |ev, cache| {
-        let env = dev_env_build(ev, a, &d)?;
+        let env = DevEnv {
+            entry,
+            ..dev_env_build(ev, a, &d)?
+        };
         if let Some(c) = cache {
             c.write(
                 ev,
@@ -446,6 +454,7 @@ fn remembered_env(result: &[u8]) -> Option<DevEnv> {
         out_path: out_path.to_string(),
         builder: builder.to_string(),
         t1: Instant::now(),
+        entry: None,
     })
 }
 
@@ -662,6 +671,7 @@ fn dev_env_build(ev: &mut Evaluator, a: EvalArgs, d: &DevEnvArgs) -> Result<DevE
             out_path,
             builder: shell.builder.clone(),
             t1,
+            entry: None,
         })
     })();
     r.map_err(|e| e.report())

@@ -48,6 +48,13 @@ fn main() -> ExitCode {
             out.push(b'\n');
             let _ = io::stdout().write_all(&out);
             eprintln!("{}", env.out_path);
+            if let Some(entry) = &env.entry
+                && let Ok(watched) = iets::api::watch::watch_paths(entry)
+            {
+                for w in watched {
+                    eprintln!("watch {}", w.path);
+                }
+            }
             ExitCode::SUCCESS
         }
         Err(code) => ExitCode::from(code as u8),
