@@ -48,8 +48,10 @@ prints.
   both.
 - `#attr.path` selects from the flake's outputs. You can quote an element
   as in Nix (`"x86_64-linux"`). No `#`, or a bare `#`, selects the whole
-  outputs attribute set; use `--strict` to print it. iets does not fill in
-  `packages.<system>.` for you.
+  outputs attribute set; use `--strict` to print it. When the outputs have
+  no such path, iets tries `packages.<system>.attr.path`, then
+  `legacyPackages.<system>.attr.path`, as `nix build` does. An exact path
+  comes first, so `#lib.x` reads `lib.x` even if a package has that name.
 - `flake.lock` must be complete: every node reachable from the root has a
   `narHash` or is a relative `path:` input, and every declared input has a
   lock entry. The declared inputs are the names in `inputs` and the

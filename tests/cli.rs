@@ -196,6 +196,38 @@ fn a_flake_fragment_completes_to_the_outputs_attribute_names() {
 }
 
 #[test]
+fn a_flake_fragment_falls_back_to_the_package_prefixes() {
+    let d = tempdir().unwrap();
+    fs::write(
+        d.path().join("flake.nix"),
+        r#"{ outputs = _: {
+          packages.x86_64-linux = { hello = "pkg"; both = "pkg"; };
+          packages.aarch64-linux = { hello = "pkg"; both = "pkg"; };
+          legacyPackages.x86_64-linux.legacy = "legacy";
+          legacyPackages.aarch64-linux.legacy = "legacy";
+          both = "top";
+        }; }"#,
+    )
+    .unwrap();
+    let eval = |frag: &str| {
+        let mut c = hermetic::iets();
+        c.current_dir(d.path()).args(["eval", "--raw", frag]);
+        c.output().unwrap()
+    };
+    assert_eq!(text(&eval(".#hello").stdout), "pkg");
+    assert_eq!(text(&eval(".#legacy").stdout), "legacy");
+    // an exact output path is taken as it is, before any prefix
+    assert_eq!(text(&eval(".#both").stdout), "top");
+    let o = eval(".#nope");
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        text(&o.stderr).contains("'legacyPackages."),
+        "{}",
+        text(&o.stderr)
+    );
+}
+
+#[test]
 fn dash_a_completes_the_attribute_names_under_its_root() {
     let d = tempdir().unwrap();
     fs::write(

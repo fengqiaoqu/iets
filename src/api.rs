@@ -300,7 +300,14 @@ pub fn evaluate_with(
             if a.flake_whole && fr.attr.is_empty() {
                 whole
             } else {
-                select_output(ev, &fr, whole)?
+                match select_output(ev, &fr, whole) {
+                    Ok(v) => v,
+                    // the exact path wins; Nix's candidates only fill a miss
+                    Err(e) if e.kind == ErrorKind::MissingAttr && !fr.attr.is_empty() => {
+                        package_output(ev, &f, whole)?
+                    }
+                    Err(e) => return Err(e),
+                }
             }
         }
         None => {
@@ -320,6 +327,26 @@ pub fn evaluate_with(
         None => {}
     }
     Ok(v)
+}
+
+/// `FLAKE#x` as `nix build` reads it: the first of `packages.<system>.x`,
+/// `legacyPackages.<system>.x` and `x` in the outputs of `whole`.
+fn package_output(ev: &mut Evaluator, f: &str, whole: Word) -> Result<Word, Box<Error>> {
+    let (loc, frag) = f.split_once('#').unwrap_or((f, ""));
+    let outputs = ev.force_attrs(whole, Pos::NONE, "while evaluating the flake")?;
+    let outputs = outputs
+        .get(ev.sym(b"outputs"))
+        .map(|o| o.cell.get())
+        .ok_or_else(|| Error::boxed(ErrorKind::MissingAttr, "flake has no outputs", Pos::NONE))?;
+    let mut found = installable::from_outputs(
+        ev,
+        outputs,
+        loc,
+        installable::Prefixes::Package,
+        frag,
+        installable::Want::First,
+    )?;
+    ev.force(found.remove(0).value)
 }
 
 /// The `--arg`/`--argstr` attrset (`nix-instantiate`'s autoArgs).
