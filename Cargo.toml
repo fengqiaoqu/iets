@@ -23,7 +23,9 @@ tonic-prost = "0.14"
 prost = "0.14"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
 tokio-stream = "0.1"
-zstd = "0.14"
+# a range, so a host that links zstd 0.13 can unify with it:
+# the stream API is the same in both
+zstd = ">=0.13, <0.15"
 lz4_flex = { version = "0.14", default-features = false, features = ["alloc", "safe-encode", "safe-decode"] }
 # The flake-input fetcher (src/fetch/http.rs, src/fetch/unpack.rs): the HTTP and
 # TLS halves are the ones tonic already brings; only the archive formats are new.
