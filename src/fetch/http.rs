@@ -262,7 +262,12 @@ fn tls() -> Result<Arc<rustls::ClientConfig>> {
         return Ok(cfg.clone());
     }
     let roots = rustls::RootCertStore::from_iter(roots::roots()?.iter().cloned());
-    let mut cfg = rustls::ClientConfig::builder()
+    // named, not the process default: a host that links rustls with a
+    // second provider has no default, and `builder()` panics there
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let mut cfg = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|e| Error::Store(format!("cannot set up TLS: {e}")))?
         .with_root_certificates(roots)
         .with_no_client_auth();
     cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
