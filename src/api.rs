@@ -12,6 +12,7 @@ pub mod flake;
 pub mod installable;
 pub mod render;
 pub mod run;
+pub mod shell_env;
 
 #[cfg(test)]
 mod concurrent_eval;

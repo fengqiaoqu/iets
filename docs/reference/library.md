@@ -46,6 +46,7 @@ because a word made up from bits would let a safe call read any address.
 | Hash a URL, or a fixed-output derivation | `api::fetch::url_hash(url, unpack, algo)`, `api::fetch::drv_hash(ev, root)` |
 | Evaluation cache | `Run::cached(&args, subcommand)`, `Run::hit`, `trace::run::Cache`; `Cache::entry_path()` names the entry a run reads |
 | What to watch for an answer to go stale | `api::watch::watch_paths(entry)` over an entry path, giving `Watched { path, kind }` capped at `api::watch::MAX` |
+| A shell's environment | `api::shell_env::shell_env(config, args, transport, options, gc_root)`: `args.input` is a flake, or an expression or a file with `args.attr` naming the shell. It builds the `-env` derivation through the daemon that `transport` names, reports an error to the session log and returns the exit code |
 | Flake references | `api::flake_ref`, `api::flake::{is_flake_ref, parse_attr_path, select, outputs, info, tree}`; `crate::flake` is private |
 
 ## What the host owns

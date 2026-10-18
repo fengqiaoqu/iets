@@ -519,11 +519,16 @@ fn dev_env_build(ev: &mut Evaluator, a: EvalArgs, d: &DevEnvArgs) -> Result<DevE
     let timings = a.timings;
     let f = match &a.input {
         Some(Input::Flake(f)) => f.clone(),
-        _ => arg_error("print-dev-env needs a FLAKEREF"),
+        Some(Input::Expr(_) | Input::File(_)) => a.attr.clone().unwrap_or_default(),
+        None => arg_error("print-dev-env needs a FLAKEREF"),
     };
-    let (loc, frag) = f.split_once('#').unwrap_or((f.as_str(), ""));
     let mut roots = Vec::new();
     let r = (|| {
+        let Some(Input::Flake(_)) = &a.input else {
+            let v = evaluate(ev, a)?;
+            return drv_roots(ev, v, &mut roots);
+        };
+        let (loc, frag) = f.split_once('#').unwrap_or((f.as_str(), ""));
         let outputs = evaluate(
             ev,
             EvalArgs {
