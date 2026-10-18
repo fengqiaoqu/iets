@@ -333,6 +333,13 @@ impl<'e> Eval<'e> {
         self.ev.mk_attrs(&mut es, Pos::NONE).map(val)
     }
 
+    /// The environment variable `name`, recorded in the tracing cache like
+    /// `builtins.getEnv`.
+    pub fn getenv(&mut self, name: &str) -> Option<String> {
+        self.ev.trace().env(name.as_bytes());
+        std::env::var(name).ok()
+    }
+
     /// The bytes of the file at `path`, recorded in the tracing cache like a
     /// file the evaluation reads itself: an entry is valid only while the
     /// file is the same, and while a missing file stays missing.

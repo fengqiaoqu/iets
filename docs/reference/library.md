@@ -212,7 +212,8 @@ let mut ev = EvalConfig::new().host_builtin(double).build();
   An `Err(msg)` is an evaluation error at the call site,
   `builtins.<name>: msg`.
 - The tracing cache cannot see inside the closure. Read files through
-  `Eval::read_file`, which records them as the evaluation's own reads.
+  `Eval::read_file` and environment variables through `Eval::getenv`,
+  which record them as the evaluation's own reads.
   Anything else the result depends on needs `HostBuiltin::key(bytes)`,
   which goes into every cache key, or `HostBuiltin::impure()`, which stops
   a run that calls the builtin from writing an entry.
