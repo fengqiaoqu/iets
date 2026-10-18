@@ -85,7 +85,7 @@ pub enum Declared {
 }
 
 /// `./sub` and `sub` are one relative path input.
-fn normal(m: &serde_json::Map<String, Value>) -> serde_json::Map<String, Value> {
+pub(crate) fn normal(m: &serde_json::Map<String, Value>) -> serde_json::Map<String, Value> {
     let mut m = m.clone();
     if m.get("type").and_then(Value::as_str) == Some("path")
         && let Some(Value::String(p)) = m.get_mut("path")

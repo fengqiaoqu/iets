@@ -17,7 +17,7 @@ use std::future::Future;
 use std::io::Cursor;
 use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
 use std::rc::Rc;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use std::{mem, result, thread};
 
@@ -292,6 +292,18 @@ pub fn get(
     decompress: bool,
     sink: &mut dyn Write,
 ) -> Result<u64> {
+    get_linked(url, headers, limits, decompress, sink).map(|(n, _)| n)
+}
+
+/// [`get`], and the URL a `Link: <…>; rel="immutable"` header named, which
+/// Nix locks a tarball input to (the lockable tarball protocol).
+pub fn get_linked(
+    url: &str,
+    headers: &[(String, String)],
+    limits: Limits,
+    decompress: bool,
+    sink: &mut dyn Write,
+) -> Result<(u64, Option<String>)> {
     let undo = |r: Box<dyn Read>| {
         if decompress {
             decompress_reader(r)
@@ -310,17 +322,19 @@ pub fn get(
         let file = File::open(sys::path_from_internal(path.as_bytes()))
             .map_err(|e| Error::io(format!("cannot read '{path}'"), e))?;
         let raw = Counted(Box::new(file), read_in.clone());
-        return drain(url, undo(Box::new(raw))?, &read_in, limits, sink);
+        return drain(url, undo(Box::new(raw))?, &read_in, limits, sink).map(|n| (n, None));
     }
     let (tx, rx) = tokio::sync::mpsc::channel(QUEUE);
     let target = url.to_string();
     let sent = headers.to_vec();
+    let link = Arc::new(Mutex::new(None));
+    let found = link.clone();
     let download = thread::spawn(move || -> Result<()> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .map_err(|e| Error::io("cannot start a tokio runtime", e))?;
-        rt.block_on(stream(&target, &sent, limits, tx))
+        rt.block_on(stream(&target, &sent, limits, tx, found))
     });
     let queued = Queued {
         rx,
@@ -332,7 +346,8 @@ pub fn get(
     download
         .join()
         .map_err(|_| Error::Store("the download thread panicked".into()))??;
-    read
+    let link = link.lock().unwrap().clone();
+    read.map(|n| (n, link))
 }
 
 /// The reading half of the queue: hyper's frames, one after the other.
@@ -427,6 +442,7 @@ async fn stream(
     headers: &[(String, String)],
     limits: Limits,
     tx: tokio::sync::mpsc::Sender<result::Result<Vec<u8>, String>>,
+    link: Arc<Mutex<Option<String>>>,
 ) -> Result<()> {
     let first = Url::parse(url)?;
     let mut sent = headers.to_vec();
@@ -437,7 +453,10 @@ async fn stream(
     let (mut redirects, mut attempt) = (0usize, 0u32);
     loop {
         let creds = if credentials { headers } else { &[] };
-        let (status, location, mut body, driver) = once(&current, creds, limits).await?;
+        let (status, location, immutable, mut body, driver) = once(&current, creds, limits).await?;
+        if let Some(l) = immutable {
+            *link.lock().unwrap() = Some(resolve(&current, &l));
+        }
         match status {
             200 => {
                 let mut sent = Ok(());
@@ -515,6 +534,7 @@ fn transient(status: u16) -> Option<u64> {
 type Started = (
     u16,
     Option<String>,
+    Option<String>,
     hyper::body::Incoming,
     tokio::task::JoinHandle<result::Result<(), hyper::Error>>,
 );
@@ -574,7 +594,15 @@ async fn once(url: &str, headers: &[(String, String)], limits: Limits) -> Result
         .get("location")
         .and_then(|v| v.to_str().ok())
         .map(str::to_string);
-    Ok((status, location, res.into_body(), driver))
+    let immutable = res
+        .headers()
+        .get_all("link")
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(","))
+        .find(|l| l.contains("rel=\"immutable\""))
+        .and_then(|l| Some(l.split_once('<')?.1.split_once('>')?.0.to_string()));
+    Ok((status, location, immutable, res.into_body(), driver))
 }
 
 trait Stream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin {}

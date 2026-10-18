@@ -48,6 +48,7 @@ because a word made up from bits would let a safe call read any address.
 | What to watch for an answer to go stale | `api::watch::watch_paths(entry)` over an entry path, giving `Watched { path, kind }` capped at `api::watch::MAX` |
 | A shell's environment | `api::shell_env::shell_env(config, args, transport, options, gc_root)`: `args.input` is a flake, or an expression or a file with `args.attr` naming the shell. It builds the `-env` derivation through the daemon that `transport` names, reports an error to the session log and returns the exit code |
 | Flake references | `api::flake_ref`, `api::flake::{is_flake_ref, parse_attr_path, select, outputs, info, tree}`; `crate::flake` is private |
+| Lock inputs a host declares | `api::lock::lock(config, inputs, old, options)`: the `flake.lock` of `api::lock::Input`s as `nix flake lock` writes it. An entry of `old` that still matches is kept without a fetch; `Options::update` names inputs to lock again, and `unlocked_paths` locks an absolute `path:` input as it is named |
 | Builtins of your own | `api::host::HostBuiltin::new(name, arity, f)`, then `EvalConfig::host_builtin` ("Host builtins") |
 | Many attributes of one root | `api::resident::Resident::start(session, config, root)`, then `eval_json(attr)` or `shell_env(attr, …)` ("One evaluator for many answers") |
 

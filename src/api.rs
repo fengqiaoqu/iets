@@ -11,6 +11,7 @@ pub mod fetch;
 pub mod flake;
 pub mod host;
 pub mod installable;
+pub mod lock;
 pub mod render;
 pub mod resident;
 pub mod run;

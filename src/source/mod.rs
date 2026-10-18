@@ -14,7 +14,7 @@
 
 mod local;
 pub mod lock;
-mod remote;
+pub(crate) mod remote;
 pub mod scm;
 
 use std::collections::BTreeMap;

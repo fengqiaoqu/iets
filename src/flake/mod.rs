@@ -7,6 +7,7 @@
 //! docs/reference/flakes.md.
 
 pub mod flakeref;
+pub(crate) mod locker;
 
 use std::path::{Path, PathBuf};
 use std::{fs, io, mem};
@@ -605,26 +606,33 @@ fn declared_ref(ev: &mut Evaluator, url: Word) -> EvalResult<Declared> {
         return Ok(Declared::Unknown);
     };
     let url = String::from_utf8_lossy(s.bytes).into_owned();
-    let Ok(mut p) = flakeref::parse(&url) else {
-        return Ok(Declared::Unknown);
-    };
+    Ok(match original_of(&url) {
+        Some(original) => Declared::Ref(url, original),
+        None => Declared::Unknown,
+    })
+}
+
+/// The `original` a lock records for the flake reference `url`.
+pub(crate) fn original_of(url: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let mut p = flakeref::parse(url).ok()?;
     if !p.dir.is_empty() {
         p.input
             .insert("dir".into(), AttrVal::Str(mem::take(&mut p.dir)));
     }
-    let original = p
-        .input
-        .into_iter()
-        .map(|(k, v)| {
-            let v = match v {
-                AttrVal::Str(s) => serde_json::Value::String(s),
-                AttrVal::Bool(b) => serde_json::Value::Bool(b),
-                AttrVal::Int(n) => serde_json::Value::from(n),
-            };
-            (k, v)
-        })
-        .collect();
-    Ok(Declared::Ref(url, original))
+    Some(
+        p.input
+            .into_iter()
+            .map(|(k, v)| (k, attr_json(v)))
+            .collect(),
+    )
+}
+
+pub(crate) fn attr_json(v: AttrVal) -> serde_json::Value {
+    match v {
+        AttrVal::Str(s) => serde_json::Value::String(s),
+        AttrVal::Bool(b) => serde_json::Value::Bool(b),
+        AttrVal::Int(n) => serde_json::Value::from(n),
+    }
 }
 
 #[cfg(test)]

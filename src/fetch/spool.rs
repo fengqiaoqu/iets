@@ -110,6 +110,9 @@ impl Node {
 pub struct Tree {
     src: Source,
     root: Node,
+    /// The latest member mtime of an indexed tarball: what Nix locks as its
+    /// `lastModified` (tarball.cc). 0 for any other tree.
+    newest: i64,
 }
 
 #[derive(Debug)]
@@ -250,6 +253,7 @@ impl Tree {
                 .map_err(|e| Error::io("cannot read the spooled tarball", e))?
                 .len(),
         );
+        let mut newest = 0i64;
         {
             let mut src = &spool;
             src.rewind()
@@ -265,6 +269,9 @@ impl Tree {
                 // not as a member; GitHub's tarballs start with one.
                 if kind.is_pax_global_extensions() {
                     continue;
+                }
+                if let Ok(t) = entry.header().mtime() {
+                    newest = newest.max(t as i64);
                 }
                 let pax = pax_sparse(&mut entry)?;
                 let name = member_name(&pax, &entry)?;
@@ -360,7 +367,12 @@ impl Tree {
         Ok(Tree {
             src: Source::Spool { spool, sparse },
             root: Node::Dir(dereference(root)),
+            newest,
         })
+    }
+
+    pub fn newest_mtime(&self) -> i64 {
+        self.newest
     }
 
     /// The spool as one regular file, not executable: what `builtins.fetchurl`
@@ -383,6 +395,7 @@ impl Tree {
                 },
                 exec: false,
             },
+            newest: 0,
         })
     }
 
@@ -405,6 +418,7 @@ impl Tree {
                 sparse: None,
             },
             root,
+            newest: 0,
         }
     }
 
@@ -412,6 +426,7 @@ impl Tree {
         Tree {
             src: Source::Packs(packs),
             root,
+            newest: 0,
         }
     }
 

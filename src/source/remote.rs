@@ -1163,3 +1163,270 @@ mod tests {
         );
     }
 }
+
+/// A tarball-shaped input before it has a `narHash`: `attrs` name a revision
+/// (`github`, `gitlab`, `sourcehut`) or a URL (`tarball`). Downloads it into
+/// the input store, which names it by what it hashes to. Gives the store
+/// path, the `narHash`, the latest mtime in the archive, which Nix locks
+/// as `lastModified`, and the immutable URL the server named, if any.
+pub fn fetch_unlocked_tarball(
+    ev: &mut Evaluator,
+    attrs: &Attrs,
+    pos: Pos,
+) -> EvalResult<(StorePath, Hash, i64, Option<String>)> {
+    let name = input_name(ev, attrs);
+    let fail = |e: String| {
+        Error::boxed(
+            ErrorKind::Eval,
+            format!("iets: cannot fetch input '{name}': {e}"),
+            pos,
+        )
+    };
+    let (url, headers) = tarball_url(nix_conf(ev.session()), attrs).map_err(fail)?;
+    let staging = format!("unlocked-{}", &blake3::hash(url.as_bytes()).to_hex()[..32]);
+    let staged =
+        treestore::stage(&staging).ok_or_else(|| fail("no cache directory to hold it".into()))?;
+    let mut spool = spool::spool_file(staged.dir()).map_err(|e| fail(e.to_string()))?;
+    let limits = Limits::new(nix_conf(ev.session())).map_err(|e| fail(e.to_string()))?;
+    log::line(&format!("iets: fetching input '{name}' to lock it"));
+    let (_, immutable) = http::get_linked(&url, &headers, limits, true, &mut spool)
+        .map_err(|e| fail(e.to_string()))?;
+    let tree = spool::Tree::index(spool, limits.max_size).map_err(|e| fail(e.to_string()))?;
+    let newest = tree.newest_mtime();
+    let mut h = Hasher::new(HashAlgo::Sha256);
+    tree.dump(&mut h).map_err(|e| fail(e.to_string()))?;
+    let hash = h.finish();
+    let sp = treestore::store_path("source", &hash).map_err(|e| fail(e.to_string()))?;
+    ev.known.lock().entry(sp.clone()).or_default();
+    if valid_in_store(ev, &sp, IngestionMethod::Recursive, &hash) {
+        return Ok((sp, hash, newest, immutable));
+    }
+    let entry = match treestore::get(sp.base_name()) {
+        Some(entry) => entry,
+        None => treestore::put("source", IngestionMethod::Recursive, &hash, staged, tree)
+            .map_err(|_| fail("cannot keep it in the input store".into()))?,
+    };
+    adopt(ev, &sp, &entry);
+    Ok((sp, hash, newest, immutable))
+}
+
+/// The `(rev, name)` pairs a Git server advertises over smart HTTP, as `git
+/// ls-remote` lists them: `HEAD` and the peeled `^{}` entries of tags among
+/// them.
+pub fn ls_remote(
+    ev: &Evaluator,
+    url: &str,
+    headers: &[(String, String)],
+) -> result::Result<Vec<(String, String)>, String> {
+    let limits = Limits::new(nix_conf(ev.session())).map_err(|e| e.to_string())?;
+    let mut body = Vec::new();
+    let at = format!(
+        "{}/info/refs?service=git-upload-pack",
+        url.trim_end_matches('/')
+    );
+    http::get(&at, headers, limits, false, &mut body).map_err(|e| e.to_string())?;
+    parse_ref_advertisement(&body)
+}
+
+fn parse_ref_advertisement(b: &[u8]) -> result::Result<Vec<(String, String)>, String> {
+    let bad = || "the server sent a malformed ref advertisement".to_string();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + 4 <= b.len() {
+        let len = std::str::from_utf8(&b[i..i + 4])
+            .ok()
+            .and_then(|h| usize::from_str_radix(h, 16).ok())
+            .ok_or_else(bad)?;
+        if len == 0 {
+            i += 4;
+            continue;
+        }
+        if len < 4 || i + len > b.len() {
+            return Err(bad());
+        }
+        let line = &b[i + 4..i + len];
+        i += len;
+        let line = line.strip_suffix(b"\n").unwrap_or(line);
+        if line.starts_with(b"#") {
+            continue;
+        }
+        let line = line.split(|&c| c == 0).next().unwrap_or(line);
+        let Some(sp) = line.iter().position(|&c| c == b' ') else {
+            continue;
+        };
+        out.push((
+            String::from_utf8_lossy(&line[..sp]).into_owned(),
+            String::from_utf8_lossy(&line[sp + 1..]).into_owned(),
+        ));
+    }
+    Ok(out)
+}
+
+/// The revision `want` names among `refs`, as git.cc resolves a ref: `HEAD`
+/// for none, else the branch, then the tag (peeled), then the full name.
+pub fn pick_ref(refs: &[(String, String)], want: Option<&str>) -> Option<(String, String)> {
+    let find = |name: &str| {
+        refs.iter()
+            .find(|(_, n)| n == name)
+            .map(|(r, _)| (r.clone(), name.to_string()))
+    };
+    let Some(want) = want else {
+        return find("HEAD");
+    };
+    if want.starts_with("refs/") {
+        return find(&format!("{want}^{{}}"))
+            .map(|(r, _)| (r, want.to_string()))
+            .or_else(|| find(want));
+    }
+    find(&format!("refs/heads/{want}"))
+        .or_else(|| {
+            find(&format!("refs/tags/{want}^{{}}")).map(|(r, _)| (r, format!("refs/tags/{want}")))
+        })
+        .or_else(|| find(&format!("refs/tags/{want}")))
+}
+
+/// The URL `git` clones a forge input from, and the headers its token needs.
+pub fn forge_git_url(
+    ev: &Evaluator,
+    attrs: &Attrs,
+) -> result::Result<(String, Vec<(String, String)>), String> {
+    let ty = str_attr(attrs, "type").unwrap_or("");
+    let owner = str_attr(attrs, "owner").ok_or("the input has no 'owner'")?;
+    let repo = str_attr(attrs, "repo").ok_or("the input has no 'repo'")?;
+    let default_host = match ty {
+        "gitlab" => "gitlab.com",
+        "sourcehut" => "git.sr.ht",
+        _ => "github.com",
+    };
+    let host = str_attr(attrs, "host").unwrap_or(default_host);
+    let headers = access_token(
+        nix_conf(ev.session()),
+        host,
+        &format!("{host}/{owner}/{repo}"),
+    )
+    .map(|t| vec![access_header(ty, &t)])
+    .unwrap_or_default();
+    let url = match ty {
+        "sourcehut" => format!("https://{host}/{owner}/{repo}"),
+        _ => format!("https://{host}/{owner}/{repo}.git"),
+    };
+    Ok((url, headers))
+}
+
+/// A clone of the Git repository at `url` in the iets cache, with `want`
+/// fetched into it: a revision, a ref, or `HEAD` for none. Gives the clone
+/// and the revision. The clone keeps the whole history, which `revCount`
+/// needs.
+pub fn git_clone(
+    url: &str,
+    want: Option<&str>,
+) -> result::Result<(std::path::PathBuf, String), String> {
+    let root = crate::cachefs::root(None).ok_or("iets has no cache directory for Git clones")?;
+    let dir = root
+        .join("git")
+        .join(&blake3::hash(url.as_bytes()).to_hex()[..32]);
+    let git = |args: &[&str]| -> result::Result<Vec<u8>, String> {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(args)
+            .stdin(Stdio::null())
+            .stderr(Stdio::inherit())
+            .output()
+            .map_err(|e| format!("cannot run git: {e}"))?;
+        if !out.status.success() {
+            return Err(format!("git {} failed for '{url}'", args.join(" ")));
+        }
+        Ok(out.stdout)
+    };
+    if !dir.join("HEAD").exists() {
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        git(&["init", "--bare", "-q"])?;
+    }
+    let is_rev = |s: &str| s.len() == 40 && s.bytes().all(|c| c.is_ascii_hexdigit());
+    match want {
+        Some(rev) if is_rev(rev) => {
+            if git(&["cat-file", "-e", &format!("{rev}^{{commit}}")]).is_err() {
+                git(&["fetch", "-q", "--no-tags", url, rev])?;
+            }
+            Ok((dir, rev.to_string()))
+        }
+        _ => {
+            let spec = format!("+{}:refs/iets/want", want.unwrap_or("HEAD"));
+            git(&["fetch", "-q", "--no-tags", url, &spec])?;
+            let rev = git(&["rev-parse", "refs/iets/want^{commit}"])?;
+            Ok((dir, String::from_utf8_lossy(&rev).trim().to_string()))
+        }
+    }
+}
+
+/// registry.cc: the entries of the user, system and global registries, in
+/// that order of precedence, as `(from, to)` attribute maps.
+pub fn flake_registry(
+    ev: &Evaluator,
+) -> Vec<(
+    serde_json::Map<String, Value>,
+    serde_json::Map<String, Value>,
+)> {
+    let mut files: Vec<Vec<u8>> = Vec::new();
+    let user = config::config_home().join("nix/registry.json");
+    files.extend(fs::read(user).ok());
+    files.extend(fs::read("/etc/nix/registry.json").ok());
+    let global = nix_conf(ev.session())
+        .str("flake-registry")
+        .unwrap_or("https://channels.nixos.org/flake-registry.json")
+        .to_string();
+    if !global.is_empty() {
+        if global.starts_with('/') {
+            files.extend(fs::read(&global).ok());
+        } else if let Ok(limits) = Limits::new(nix_conf(ev.session())) {
+            let mut body = Vec::new();
+            if http::get(&global, &[], limits, true, &mut body).is_ok() {
+                files.push(body);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for bytes in files {
+        let Ok(v) = serde_json::from_slice::<Value>(&bytes) else {
+            continue;
+        };
+        for f in v["flakes"].as_array().into_iter().flatten() {
+            if let (Some(from), Some(to)) = (f["from"].as_object(), f["to"].as_object()) {
+                out.push((from.clone(), to.clone()));
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod lock_tests {
+    use super::*;
+
+    fn pkt(s: &str) -> String {
+        format!("{:04x}{s}", s.len() + 4)
+    }
+
+    #[test]
+    fn a_ref_advertisement_lists_refs_and_picks_like_git() {
+        let body = format!(
+            "{}0000{}{}{}{}0000",
+            pkt("# service=git-upload-pack\n"),
+            pkt("aaaa HEAD\0multi_ack symref=HEAD:refs/heads/main\n"),
+            pkt("aaaa refs/heads/main\n"),
+            pkt("bbbb refs/tags/v1\n"),
+            pkt("cccc refs/tags/v1^{}\n"),
+        );
+        let refs = parse_ref_advertisement(body.as_bytes()).unwrap();
+        assert_eq!(refs.len(), 4);
+        assert_eq!(pick_ref(&refs, None).unwrap().0, "aaaa");
+        assert_eq!(pick_ref(&refs, Some("main")).unwrap().0, "aaaa");
+        // a tag resolves to the commit it peels to
+        assert_eq!(
+            pick_ref(&refs, Some("v1")).unwrap(),
+            ("cccc".into(), "refs/tags/v1".into())
+        );
+        assert!(pick_ref(&refs, Some("nope")).is_none());
+    }
+}
