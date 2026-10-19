@@ -1,9 +1,9 @@
 diff --git i/src/aotstats.rs w/src/aotstats.rs
 new file mode 100644
-index 00000000..3f9a7e87
+index 00000000..ba385745
 --- /dev/null
 +++ w/src/aotstats.rs
-@@ -0,0 +1,155 @@
+@@ -0,0 +1,480 @@
 +//! Scratch census for the precompiled-IR exploration; not for landing.
 +use std::collections::HashMap;
 +use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
@@ -86,6 +86,7 @@ index 00000000..3f9a7e87
 +        l(&WITH_GLOBAL),
 +        WITH_CHAIN_LEN.iter().map(l).collect::<Vec<_>>(),
 +    );
++    dump_dup();
 +    eprintln!("AOT eager ok={} err={}", l(&EAGER_OK), l(&EAGER_ERR));
 +    if let Some(p) = std::env::var_os("IETS_AOT_ERR_TO")
 +        && let Some(e) = ERR_SITES.lock().unwrap().as_ref()
@@ -159,11 +160,355 @@ index 00000000..3f9a7e87
 +pub fn err_site(k: (u64, u8)) {
 +    ERR_SITES.lock().unwrap().get_or_insert_with(Default::default).insert(k);
 +}
++
++use crate::compile::ir::{AttrElemIr, Ir, IrRef, ParamIr};
++use std::hash::{Hash, Hasher};
++
++#[derive(Default)]
++pub struct Dup {
++    nodes: u64,
++    lambdas: u64,
++    distinct: std::collections::HashSet<u64>,
++    seen_lambdas: std::collections::HashSet<u64>,
++    lambda_dup: u64,
++    lambda_dup_nodes: u64,
++    closed_dup: u64,
++}
++
++pub static DUP: Mutex<Option<Dup>> = Mutex::new(None);
++
++type Memo = HashMap<usize, (u64, u64)>;
++
++fn h_of(parts: &[u64]) -> u64 {
++    let mut h = std::collections::hash_map::DefaultHasher::new();
++    parts.hash(&mut h);
++    h.finish()
++}
++
++/// Structural hash and node count of `ir`, positions and names ignored.
++fn shape(ir: IrRef, m: &mut Memo, d: &mut Dup) -> (u64, u64) {
++    let k = ir as *const Ir as usize;
++    if let Some(&r) = m.get(&k) {
++        return r;
++    }
++    let mut p: Vec<u64> = Vec::new();
++    let mut n = 1u64;
++    let mut kid = |e: IrRef, p: &mut Vec<u64>, n: &mut u64, m: &mut Memo, d: &mut Dup| {
++        let (h, c) = shape(e, m, d);
++        p.push(h);
++        *n += c;
++    };
++    let sym = |s: crate::syntax::symbol::Sym| {
++        let mut h = std::collections::hash_map::DefaultHasher::new();
++        s.hash(&mut h);
++        h.finish()
++    };
++    macro_rules! elems {
++        ($path:expr) => {
++            for e in $path.iter() {
++                match e {
++                    AttrElemIr::Static(s) => p.push(sym(*s)),
++                    AttrElemIr::Dynamic(e) => kid(e, &mut p, &mut n, m, d),
++                }
++            }
++        };
++    }
++    match ir {
++        Ir::Const(w) => p.extend([1, w.bits()]),
++        Ir::Local { depth, idx } => p.extend([2, u64::from(*depth), u64::from(*idx)]),
++        Ir::WithVar { sym: s, withs, .. } => {
++            p.extend([3, sym(*s)]);
++            p.extend(withs.iter().map(|&x| u64::from(x)));
++        }
++        Ir::CurPos(_) => p.push(4),
++        Ir::Concat { force_string, parts, .. } => {
++            p.extend([5, u64::from(*force_string)]);
++            for e in parts.iter() {
++                kid(e, &mut p, &mut n, m, d);
++            }
++        }
++        Ir::SearchPath { name, .. } => {
++            p.push(6);
++            kid(name, &mut p, &mut n, m, d);
++        }
++        Ir::Select(s) | Ir::SelectCount(s) => {
++            p.push(if matches!(ir, Ir::Select(_)) { 7 } else { 8 });
++            kid(s.subject, &mut p, &mut n, m, d);
++            elems!(s.path);
++            if let Some(e) = s.default {
++                kid(e, &mut p, &mut n, m, d);
++            }
++        }
++        Ir::Select1 { subject, sym: s, default, .. } => {
++            p.extend([9, sym(*s)]);
++            kid(subject, &mut p, &mut n, m, d);
++            if let Some(e) = default {
++                kid(e, &mut p, &mut n, m, d);
++            }
++        }
++        Ir::HasAttr { subject, path } => {
++            p.push(10);
++            kid(subject, &mut p, &mut n, m, d);
++            elems!(path);
++        }
++        Ir::Attrs(a) => {
++            p.extend([11, u64::from(a.rec), a.overrides.map_or(u64::MAX, u64::from)]);
++            for b in a.binds.iter() {
++                p.extend([sym(b.sym), b.scope as u64]);
++                kid(b.value, &mut p, &mut n, m, d);
++            }
++            for e in a.from.iter() {
++                kid(e, &mut p, &mut n, m, d);
++            }
++            for db in a.dynamic.iter() {
++                kid(db.name, &mut p, &mut n, m, d);
++                kid(db.value, &mut p, &mut n, m, d);
++            }
++        }
++        Ir::List(items) => {
++            p.push(12);
++            for e in items.iter() {
++                kid(e, &mut p, &mut n, m, d);
++            }
++        }
++        Ir::Lambda(l) => {
++            p.push(13);
++            match &l.param {
++                ParamIr::Ident => p.push(0),
++                ParamIr::Formals { has_bind, formals, ellipsis } => {
++                    p.extend([1, u64::from(*has_bind), u64::from(*ellipsis)]);
++                    for f in formals.iter() {
++                        p.push(sym(f.sym));
++                        match f.default {
++                            Some(e) => kid(e, &mut p, &mut n, m, d),
++                            None => p.push(0),
++                        }
++                    }
++                }
++            }
++            kid(l.body, &mut p, &mut n, m, d);
++        }
++        Ir::Apply { func, args, .. } => {
++            p.push(14);
++            kid(func, &mut p, &mut n, m, d);
++            for e in args.iter() {
++                kid(e, &mut p, &mut n, m, d);
++            }
++        }
++        Ir::Let(l) => {
++            p.push(15);
++            for b in l.binds.iter() {
++                p.extend([sym(b.sym), b.scope as u64]);
++                kid(b.value, &mut p, &mut n, m, d);
++            }
++            for e in l.from.iter() {
++                kid(e, &mut p, &mut n, m, d);
++            }
++            kid(l.body, &mut p, &mut n, m, d);
++        }
++        Ir::With { scope, body, .. } => {
++            p.push(16);
++            kid(scope, &mut p, &mut n, m, d);
++            kid(body, &mut p, &mut n, m, d);
++        }
++        Ir::If { cond, then, else_, .. } => {
++            p.push(17);
++            for e in [*cond, *then, *else_] {
++                kid(e, &mut p, &mut n, m, d);
++            }
++        }
++        Ir::Assert { cond, body, .. } => {
++            p.push(18);
++            kid(cond, &mut p, &mut n, m, d);
++            kid(body, &mut p, &mut n, m, d);
++        }
++        Ir::Not(e, _) | Ir::Neg(e, _) => {
++            p.push(if matches!(ir, Ir::Not(..)) { 19 } else { 20 });
++            kid(e, &mut p, &mut n, m, d);
++        }
++        Ir::Eq(a, b, _) | Ir::Ne(a, b, _) | Ir::Lt(a, b, _) | Ir::Gt(a, b, _) | Ir::Le(a, b, _)
++        | Ir::Ge(a, b, _) | Ir::And(a, b, _) | Ir::Or(a, b, _) | Ir::Impl(a, b, _)
++        | Ir::Update(a, b, _) | Ir::ConcatLists(a, b, _) | Ir::Sub(a, b, _) | Ir::Mul(a, b, _)
++        | Ir::Div(a, b, _) => {
++            p.push(std::mem::discriminant(ir).hash_code());
++            kid(a, &mut p, &mut n, m, d);
++            kid(b, &mut p, &mut n, m, d);
++        }
++    }
++    let h = h_of(&p);
++    d.nodes += 0;
++    m.insert(k, (h, n));
++    (h, n)
++}
++
++trait HashCode {
++    fn hash_code(&self) -> u64;
++}
++impl<T> HashCode for std::mem::Discriminant<T> {
++    fn hash_code(&self) -> u64 {
++        let mut h = std::collections::hash_map::DefaultHasher::new();
++        self.hash(&mut h);
++        h.finish()
++    }
++}
++
++/// Top-down: count every node, and every lambda whose shape an earlier
++/// lambda already had; the body of such a lambda is not walked again.
++fn walk(ir: IrRef, m: &Memo, d: &mut Dup, visited: &mut std::collections::HashSet<usize>) {
++    let k = ir as *const Ir as usize;
++    if !visited.insert(k) {
++        return;
++    }
++    let (h, n) = m[&k];
++    d.nodes += 1;
++    d.distinct.insert(h);
++    if let Ir::Lambda(l) = ir {
++        d.lambdas += 1;
++        if !d.seen_lambdas.insert(h) {
++            d.lambda_dup += 1;
++            d.lambda_dup_nodes += n;
++            d.closed_dup += u64::from(l.closed);
++            count_rest(ir, m, d, visited);
++            return;
++        }
++    }
++    children(ir, &mut |c| walk(c, m, d, visited));
++}
++
++fn count_rest(ir: IrRef, m: &Memo, d: &mut Dup, visited: &mut std::collections::HashSet<usize>) {
++    children(ir, &mut |c| {
++        let k = c as *const Ir as usize;
++        if visited.insert(k) {
++            d.nodes += 1;
++            d.distinct.insert(m[&k].0);
++            count_rest(c, m, d, visited);
++        }
++    });
++}
++
++fn children(ir: IrRef, f: &mut dyn FnMut(IrRef)) {
++    let el = |path: &[AttrElemIr], f: &mut dyn FnMut(IrRef)| {
++        for e in path {
++            if let AttrElemIr::Dynamic(e) = e {
++                f(e);
++            }
++        }
++    };
++    match ir {
++        Ir::Const(_) | Ir::Local { .. } | Ir::WithVar { .. } | Ir::CurPos(_) => {}
++        Ir::Concat { parts, .. } => parts.iter().for_each(|e| f(e)),
++        Ir::SearchPath { name, .. } => f(name),
++        Ir::Select(s) | Ir::SelectCount(s) => {
++            f(s.subject);
++            el(s.path, f);
++            if let Some(e) = s.default {
++                f(e);
++            }
++        }
++        Ir::Select1 { subject, default, .. } => {
++            f(subject);
++            if let Some(e) = default {
++                f(e);
++            }
++        }
++        Ir::HasAttr { subject, path } => {
++            f(subject);
++            el(path, f);
++        }
++        Ir::Attrs(a) => {
++            a.binds.iter().for_each(|b| f(b.value));
++            a.from.iter().for_each(|e| f(e));
++            a.dynamic.iter().for_each(|b| {
++                f(b.name);
++                f(b.value);
++            });
++        }
++        Ir::List(items) => items.iter().for_each(|e| f(e)),
++        Ir::Lambda(l) => {
++            if let ParamIr::Formals { formals, .. } = &l.param {
++                formals.iter().filter_map(|x| x.default).for_each(|e| f(e));
++            }
++            f(l.body);
++        }
++        Ir::Apply { func, args, .. } => {
++            f(func);
++            args.iter().for_each(|e| f(e));
++        }
++        Ir::Let(l) => {
++            l.binds.iter().for_each(|b| f(b.value));
++            l.from.iter().for_each(|e| f(e));
++            f(l.body);
++        }
++        Ir::With { scope, body, .. } => {
++            f(scope);
++            f(body);
++        }
++        Ir::If { cond, then, else_, .. } => {
++            f(cond);
++            f(then);
++            f(else_);
++        }
++        Ir::Assert { cond, body, .. } => {
++            f(cond);
++            f(body);
++        }
++        Ir::Not(e, _) | Ir::Neg(e, _) => f(e),
++        Ir::Eq(a, b, _) | Ir::Ne(a, b, _) | Ir::Lt(a, b, _) | Ir::Gt(a, b, _) | Ir::Le(a, b, _)
++        | Ir::Ge(a, b, _) | Ir::And(a, b, _) | Ir::Or(a, b, _) | Ir::Impl(a, b, _)
++        | Ir::Update(a, b, _) | Ir::ConcatLists(a, b, _) | Ir::Sub(a, b, _) | Ir::Mul(a, b, _)
++        | Ir::Div(a, b, _) => {
++            f(a);
++            f(b);
++        }
++    }
++}
++
++pub fn note_file(root: IrRef) {
++    let mut g = DUP.lock().unwrap();
++    let d = g.get_or_insert_with(Default::default);
++    let mut m = Memo::new();
++    shape(root, &mut m, d);
++    walk(root, &m, d, &mut Default::default());
++}
++
++pub fn dump_dup() {
++    let g = DUP.lock().unwrap();
++    let Some(d) = g.as_ref() else { return };
++    eprintln!(
++        "AOT dup nodes={} distinct_shapes={} lambdas={} lambda_dup={} lambda_dup_nodes={} closed_dup={}",
++        d.nodes,
++        d.distinct.len(),
++        d.lambdas,
++        d.lambda_dup,
++        d.lambda_dup_nodes,
++        d.closed_dup
++    );
++}
 diff --git i/src/eval/mod.rs w/src/eval/mod.rs
-index 75c2c995..95100848 100644
+index 75c2c995..d8670ae7 100644
 --- i/src/eval/mod.rs
 +++ w/src/eval/mod.rs
-@@ -1057,6 +1057,9 @@ impl Evaluator {
+@@ -790,6 +790,19 @@ impl Evaluator {
+         path: &[u8],
+         src: Vec<u8>,
+         base_dir: &[u8],
++    ) -> EvalResult<IrRef> {
++        let ir = self.compile_file_inner(path, src, base_dir)?;
++        if crate::aotstats::on() {
++            crate::aotstats::note_file(ir);
++        }
++        Ok(ir)
++    }
++
++    fn compile_file_inner(
++        &mut self,
++        path: &[u8],
++        src: Vec<u8>,
++        base_dir: &[u8],
+     ) -> EvalResult<IrRef> {
+         if path.starts_with(CorePkgs::PREFIX) {
+             return self.compile_internal(path, &src);
+@@ -1057,6 +1070,9 @@ impl Evaluator {
              return Ok(w.thunk_value(st));
          }
          state.set(Word::BLACKHOLE);
@@ -173,7 +518,7 @@ index 75c2c995..95100848 100644
          #[cfg(feature = "stats2")]
          {
              self.arena.stats.census.forced[match w.thunk_kind() {
-@@ -1117,6 +1120,52 @@ impl Evaluator {
+@@ -1117,6 +1133,52 @@ impl Evaluator {
  
      /// Wrap `ir` for lazy evaluation in `env`, sharing existing values and
      /// thunks for cheap expressions.
@@ -226,7 +571,7 @@ index 75c2c995..95100848 100644
      #[inline]
      pub fn maybe_thunk(&mut self, env: &'static EnvObj, ir: IrRef) -> Word {
          match ir {
-@@ -1183,6 +1232,9 @@ impl Evaluator {
+@@ -1183,6 +1245,9 @@ impl Evaluator {
  
      #[inline]
      fn mk_thunk_counted(&mut self, env: &'static EnvObj, ir: IrRef) -> Word {
@@ -236,7 +581,7 @@ index 75c2c995..95100848 100644
          self.nr_thunks += 1;
          self.arena.mk_thunk(env, ir)
      }
-@@ -1770,7 +1822,7 @@ impl Evaluator {
+@@ -1770,7 +1835,7 @@ impl Evaluator {
              Ir::List(items) => {
                  let l = self.arena.alloc_list_as(items.len(), Stat::ListLit);
                  for (c, item) in l.cells().iter().zip(items.iter()) {
@@ -245,7 +590,7 @@ index 75c2c995..95100848 100644
                      c.set(w);
                  }
                  Ok(Word::from_ref(l))
-@@ -1781,11 +1833,11 @@ impl Evaluator {
+@@ -1781,11 +1846,11 @@ impl Evaluator {
                  let mut buf: [Word; 8] = [Word::EMPTY; 8];
                  if args.len() <= 8 {
                      for (i, a) in args.iter().enumerate() {
@@ -259,7 +604,7 @@ index 75c2c995..95100848 100644
                      self.apply(f, &v, *pos)
                  }
              }
-@@ -1970,7 +2022,13 @@ impl Evaluator {
+@@ -1970,7 +2035,13 @@ impl Evaluator {
      ) -> EvalResult<Word> {
          let mut e = env;
          let mut walked = 0u32;
@@ -274,7 +619,7 @@ index 75c2c995..95100848 100644
              for _ in walked..d {
                  e = e.up().expect("compile-time depth is valid");
              }
-@@ -1983,8 +2041,18 @@ impl Evaluator {
+@@ -1983,8 +2054,18 @@ impl Evaluator {
              )?;
              e.slot(0).set(Word::from_ref(attrs));
              if let Some(a) = attrs.get(sym) {
@@ -293,7 +638,7 @@ index 75c2c995..95100848 100644
          }
          if let Some(w) = self.globals.table.get(&sym) {
              return Ok(*w);
-@@ -2228,7 +2296,7 @@ impl Evaluator {
+@@ -2228,7 +2309,7 @@ impl Evaluator {
              for b in a.binds.iter() {
                  let w = match b.scope {
                      BindScope::From => self.maybe_thunk(inherit_env.unwrap(), b.value),
@@ -302,7 +647,7 @@ index 75c2c995..95100848 100644
                  };
                  entries.push((b.sym, b.pos, w));
              }
-@@ -2277,7 +2345,7 @@ impl Evaluator {
+@@ -2277,7 +2358,7 @@ impl Evaluator {
              for (i, b) in a.binds.iter().enumerate() {
                  let w = match b.scope {
                      BindScope::From => self.maybe_thunk(inherit_env.unwrap(), b.value),
@@ -311,7 +656,7 @@ index 75c2c995..95100848 100644
                  };
                  out.init(i, b.sym, b.pos, w);
              }
-@@ -2619,6 +2687,24 @@ impl ArithOp {
+@@ -2619,6 +2700,24 @@ impl ArithOp {
  }
  
  /// Best-effort position of an IR node, for error messages.

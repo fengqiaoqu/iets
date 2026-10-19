@@ -100,6 +100,7 @@ one could remove. It applies to `bdd26f2c` and is not part of the build.
 | resolve `with` | every `WithVar` evaluation in nixos-server | under 0.1 % | not worth it |
 | evaluate always-forced thunks directly | a profile oracle, timed against a control | 2.0 % faster at most, one worker only | not worth it |
 | `mmap`-able IR, precomputed symbols | the load time above | at most 13 % warm, 3.3 % nixpkgs-wide | only if the load becomes the bottleneck |
+| merge duplicate functions | the shape of every loaded IR tree | 0.5 % of the IR, no time | not worth it |
 | specialise `callPackage`, fold `lib` | the evaluation profile | not priced; argued below | not worth it |
 
 ### Resolving `with`
@@ -161,6 +162,30 @@ arena, so it costs little to make.
 The oracle also hangs at four workers. An early evaluation is not a
 thunk, so the deadlock breaker in [How iets evaluates](evaluation.md) has
 nothing to reset. A real analysis would need that fixed first.
+
+### Merging duplicate functions
+
+A whole-program compiler could give identical functions one body. The
+census hashes the shape of every loaded IR tree, with positions and names
+left out. Because variables are slot numbers, two functions that differ
+only in variable names hash the same.
+
+| workload, 1 worker | IR nodes | functions | functions that repeat an earlier one | nodes in them | distinct subtrees |
+|---|---|---|---|---|---|
+| nixos-server | 1.56 M | 36,748 | 1,571 (4.3 %) | 7,736 (0.5 %) | 583,280 (37 %) |
+| outpaths 0/8, largest worker | 3.03 M | 69,934 | 2,379 (3.4 %) | 12,332 (0.4 %) | 1.21 M (40 %) |
+
+Most of the repeats are small closed functions such as `x: x`. Merging
+whole functions saves 0.5 % of the IR, about 250 kB, and no time: every
+evaluation of a function expression still makes its own closure. Sharing
+such a closure was priced on [What was tried and removed](history.md) at
+16 MB of a 7.1 GB arena.
+
+Sharing every repeated subtree would cut the nodes by about 60 %. The IR
+is 99 MiB of the 754 MiB peak RSS on nixos-server, so the bound is about
+60 MiB of memory and no run time. Every node carries the position that an
+error message prints, so shared nodes need their positions kept per use,
+which takes back part of that memory.
 
 ### `callPackage` and `lib`
 
