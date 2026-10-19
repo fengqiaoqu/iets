@@ -21,7 +21,6 @@ let
 in
 {
   classic-e2e = { setup = "${leftovers}"; };
-  daemon-e2e = { packages = [ pkgs.jq ]; };
   grpc-e2e = {
     packages = [ nix-grpc-daemon ];
     env = "DAEMON=${nix-grpc-daemon}";

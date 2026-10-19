@@ -14,7 +14,7 @@ for each set that is ready to build.
 
 ## Worker protocol timings
 
-The figures come from `scripts/daemon-e2e.nu` on a release build.
+The figures are from runs on the hello closure, with a release build.
 
 "Local daemon" is this machine's `nix-daemon`, where the hello closure is
 GC-rooted, so a cold run is impossible. "Scratch daemon" is
@@ -39,7 +39,7 @@ was the `QueryValidPaths` request: 776 full store paths as padded strings,
 and the 776 answers back. Now a warm store answers with the root: the warm
 hello run against the scratch daemon asks about 1 path and sends 248 bytes,
 and the hello run against the local daemon asks about the root and its
-output, builds nothing, and sends 336 bytes (`scripts/daemon-e2e.nu`). The custom drv's
+output, builds nothing, and sends 336 bytes. The custom drv's
 0.87 s "build" is the sandbox build itself. The 413 paths the local daemon
 lacked for nixos-server are nixpkgs subtrees that no local evaluation had
 copied yet.
@@ -88,15 +88,15 @@ socket, it runs only `ssh` and writes the output to `--fetch-to`.
 
 ### Upload integrity
 
-After an upload, `scripts/daemon-e2e.nu` checks that:
+After an upload, `tests/e2e_daemon.rs` checks that:
 
 - the `.drv` file in the store is `cmp`-identical to the one
   `nix-instantiate` wrote before it was deleted;
 - `nix-store -q --hash`, `nix derivation show` and `nix path-info --json`
   (`ca`, `narHash`, `narSize`, `references`) match for the derivation and
   for the source;
-- in the scratch store, the hello derivation has the same hash as in the
-  local store, and every input source has the same `ca`.
+- in the scratch store, the derivation has the same hash as in the local
+  store, and every input source has the same `ca`.
 
 ## The `grpc://` transport
 

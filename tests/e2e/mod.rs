@@ -130,6 +130,11 @@ impl Store {
         self.write("pkgs/env.nix", &env.replace("@PATH@", path));
     }
 
+    /// The stdout of `nix-store args`, which must succeed.
+    pub fn nix_store(&self, args: &[&str]) -> String {
+        stdout(&ok(self.nix("nix-store").args(args)))
+    }
+
     /// An empty dir for PATH and IETS_NIX_BIN_DIR: no nix to fall back on.
     pub fn no_nix(&self) -> PathBuf {
         let d = self.dir().join("nobin");
@@ -193,12 +198,153 @@ impl Store {
     }
 }
 
+/// A second daemon on the same store dir, with its files under `root`, for
+/// the `--builder` of a test. Its store is relocated, so Nix builds in the
+/// sandbox there, with the host's `/nix/store` for bash and coreutils.
+/// Chroot stores are Linux only.
+pub struct Builder {
+    root: PathBuf,
+    store: String,
+    daemon: Child,
+}
+
+/// A chroot store takes `/nix/store` unless `store=` names the store dir.
+fn builder_store(root: &Path, store_dir: &Path) -> String {
+    format!(
+        "local?root={}&store={}",
+        root.display(),
+        store_dir.display()
+    )
+}
+
+impl Builder {
+    pub fn socket(&self) -> PathBuf {
+        self.root.join("socket")
+    }
+
+    pub fn url(&self) -> String {
+        format!("unix://{}", self.socket().display())
+    }
+
+    /// `local?root=…`, for `--store` on the Nix side.
+    pub fn store(&self) -> String {
+        self.store.clone()
+    }
+
+    /// Where store path `path` lies on disk: under `root/nix/store`, the
+    /// default of Nix's `real` setting for a chroot store.
+    pub fn real(&self, path: &str) -> PathBuf {
+        self.root
+            .join("nix/store")
+            .join(path.rsplit('/').next().unwrap())
+    }
+}
+
+impl Drop for Builder {
+    fn drop(&mut self) {
+        // SAFETY: kill only sends a signal
+        unsafe { libc::kill(-(self.daemon.id() as i32), libc::SIGKILL) };
+        let _ = self.daemon.wait();
+    }
+}
+
+impl Store {
+    /// A [`Builder`] named `name`, with `opts` as `--option`s.
+    pub fn builder(&self, name: &str, opts: &[(&str, &str)]) -> Builder {
+        let root = self.dir().join(name);
+        fs::create_dir(&root).unwrap();
+        let mut cmd = Command::new(which("nix-daemon").unwrap());
+        Store::env(self.dir(), &mut cmd);
+        let log = fs::File::create(root.join("daemon.log")).unwrap();
+        cmd.env("NIX_DAEMON_SOCKET_PATH", root.join("socket"))
+            .arg("--store")
+            .arg(builder_store(&root, &self.store_dir()))
+            .args(["--option", "sandbox-paths", "/nix/store"]);
+        for (k, v) in opts {
+            cmd.args(["--option", k, v]);
+        }
+        cmd.stdin(Stdio::null())
+            .stdout(log.try_clone().unwrap())
+            .stderr(log)
+            .process_group(0);
+        let mut b = Builder {
+            daemon: cmd.spawn().expect("spawn nix-daemon"),
+            store: builder_store(&root, &self.store_dir()),
+            root,
+        };
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !b.socket().exists() {
+            let exited = b.daemon.try_wait().unwrap().is_some();
+            assert!(
+                !exited && Instant::now() < deadline,
+                "no builder socket: {}",
+                fs::read_to_string(b.root.join("daemon.log")).unwrap_or_default()
+            );
+            thread::sleep(Duration::from_millis(20));
+        }
+        b
+    }
+}
+
 impl Drop for Store {
     fn drop(&mut self) {
         // SAFETY: kill only sends a signal
         unsafe { libc::kill(-(self.daemon.id() as i32), libc::SIGKILL) };
         let _ = self.daemon.wait();
     }
+}
+
+/// The system the tree also names, which nothing builds.
+pub const OTHER: &str = "riscv64-none";
+
+const CHECKS_FLAKE: &str = r#"{
+  outputs = { self }:
+    let
+      systems = [ "@SYSTEM@" "@OTHER@" ];
+      forAll = f: builtins.listToAttrs (map (s: { name = s; value = f s; }) systems);
+      drv = system: name: args: derivation ({
+        inherit name system;
+        builder = "@SHELL@";
+      } // args);
+      nonce = "@NONCE@";
+    in {
+      checks = forAll (system: rec {
+        ok = drv system "fb-ok" {
+          args = [ "-c" "echo building fb-ok ${nonce}; echo done > $out" ];
+        };
+        dep = drv system "fb-dep" {
+          args = [ "-c" "echo building fb-dep ${nonce}; echo dep > $out" ];
+        };
+        chain = drv system "fb-chain" {
+          args = [ "-c" "echo building fb-chain ${nonce}; while read -r l; do echo \"$l\"; done < ${dep} > $out" ];
+        };
+        bad = drv system "fb-bad" {
+          args = [ "-c" "echo about to fail ${nonce}; echo line2; exit 1" ];
+        };
+      });
+      packages = forAll (system: {
+        lone = drv system "fb-lone" {
+          args = [ "-c" "echo building fb-lone ${nonce}; echo lone > $out" ];
+        };
+      });
+    };
+}
+"#;
+
+/// The checks flake in `dir`: `ok`, `dep`, `chain` (which reads `dep`) and
+/// `bad` (which exits 1) for two systems, and a `packages` set. It has its
+/// own nonce, and a lock written here: iets only evaluates locked flakes,
+/// and `nix flake lock` writes nothing for one without inputs.
+pub fn checks_flake(s: &Store, dir: &str) -> String {
+    let text = CHECKS_FLAKE
+        .replace("@OTHER@", OTHER)
+        .replace("@NONCE@", &format!("@NONCE@-{dir}"));
+    s.write(&format!("{dir}/flake.nix"), &text);
+    s.write(
+        &format!("{dir}/flake.lock"),
+        r#"{"nodes":{"root":{}},"root":"root","version":7}"#,
+    );
+    format!("path:{}", s.dir().join(dir).display())
 }
 
 /// Nix's `system` for this host.
@@ -292,6 +438,27 @@ impl Drop for Checks {
             panic!("{} failed:\n{}", self.0.len(), self.0.join("\n\n"));
         }
     }
+}
+
+/// A derivation that copies `DIR/src/a` and `DIR/src/sub/b`, at
+/// `DIR/case.nix`.
+pub fn make_case(s: &Store, dir: &str, name: &str) -> String {
+    s.write(&format!("{dir}/src/a"), &format!("hello @NONCE@ {dir}\n"));
+    s.write(&format!("{dir}/src/sub/b"), "zzz\n");
+    let src = s.dir().join(dir).join("src");
+    let text = r#"derivation {
+  name = "@NAME@";
+  system = "@SYSTEM@";
+  builder = "@SHELL@";
+  args = [ "-c" "while read -r l; do echo \"$l\"; done < ${@SRC@}/a > $out; while read -r l; do echo \"$l\"; done < ${@SRC@}/sub/b >> $out" ];
+}
+"#
+    .replace("@NAME@", name)
+    .replace("@SRC@", src.to_str().unwrap());
+    s.write(&format!("{dir}/case.nix"), &text)
+        .to_str()
+        .unwrap()
+        .to_string()
 }
 
 /// The stdout of `o` as JSON.
