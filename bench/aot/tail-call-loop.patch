@@ -1,0 +1,65 @@
+diff --git a/src/eval/mod.rs b/src/eval/mod.rs
+index 75c2c99..9cd450e 100644
+--- a/src/eval/mod.rs
++++ b/src/eval/mod.rs
+@@ -1721,8 +1721,11 @@ impl Evaluator {
+     }
+ 
+     /// Evaluate `ir` in `env` to weak head normal form.
+-    pub fn eval(&mut self, env: &'static EnvObj, ir: IrRef) -> EvalResult<Word> {
+-        match ir {
++    pub fn eval(&mut self, mut env: &'static EnvObj, mut ir: IrRef) -> EvalResult<Word> {
++        // `let`, `with`, `if` and `assert` add no trace, so their body
++        // runs in this frame instead of a nested one
++        loop {
++        return match ir {
+             Ir::Const(w) => Ok(*w),
+             Ir::Local { depth, idx } => {
+                 let mut e = env;
+@@ -1790,14 +1793,17 @@ impl Evaluator {
+                 }
+             }
+             Ir::Let(l) => {
+-                let env2 = self.alloc_rec_env(env, l.binds, l.from, false);
+-                self.eval(env2, l.body)
++                env = self.alloc_rec_env(env, l.binds, l.from, false);
++                ir = l.body;
++                continue;
+             }
+             Ir::With { scope, body, .. } => {
+                 let env2 = self.arena.alloc_env(Some(env), 1);
+                 let w = self.maybe_thunk(env, scope);
+                 env2.slot(0).set(w);
+-                self.eval(env2, body)
++                env = env2;
++                ir = body;
++                continue;
+             }
+             Ir::If {
+                 cond,
+@@ -1806,13 +1812,15 @@ impl Evaluator {
+                 pos,
+             } => {
+                 let c = self.eval_bool(env, cond, *pos, "while evaluating a branch condition")?;
+-                self.eval(env, if c { then } else { else_ })
++                ir = if c { then } else { else_ };
++                continue;
+             }
+             Ir::Assert { cond, body, pos } => {
+                 if !self.eval_bool(env, cond, *pos, "in the condition of the assert statement")? {
+                     bail!(ErrorKind::Assert, *pos, "assertion failed");
+                 }
+-                self.eval(env, body)
++                ir = body;
++                continue;
+             }
+             Ir::Not(e, pos) => {
+                 let b = self.eval_bool(env, e, *pos, "in the argument of the not operator")?;
+@@ -1942,6 +1950,7 @@ impl Evaluator {
+                 let b = self.eval(env, r)?;
+                 self.arith(a, b, ArithOp::Div, *pos)
+             }
++        };
+         }
+     }
+ 

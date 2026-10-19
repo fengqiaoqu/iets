@@ -198,6 +198,91 @@ samples. Folding needs a value that does not depend on the
 configuration, and such a value in `lib` is already a shared thunk, forced
 once per run.
 
+## Techniques from the books
+
+The standard texts on lazy functional languages list more techniques
+than the ones above. Most of them are already in iets, or were measured
+and removed ([What was tried and removed](history.md)). Five were left
+untried. Each is measured here against the bar `history.md` uses: more
+than 2 % of wall time on one workload at one worker, no regression above
+1 % elsewhere, and the same drvPaths.
+
+| technique | source | how it was measured | effect | verdict |
+|---|---|---|---|---|
+| multi-argument calls | Marlow and Peyton Jones, "Making a fast curry", ICFP 2004; Appel, *Compiling with Continuations* §6.2 | prototype, `bench/aot/multi-arg-calls.patch` | −2.1 % server, −4.6 % outpaths, at one worker | worth landing |
+| a loop for tail positions in `eval` | Peyton Jones 1987, ch. 21 | prototype, `bench/aot/tail-call-loop.patch` | −1.8 % server, −1.9 % outpaths, at one worker | under the bar |
+| full laziness | Peyton Jones 1987, ch. 15; Peyton Jones, Partain and Santos, "Let-floating", ICFP 1996 | census of repeated calls | at most 1.5 % of calls, 2.4 % of thunks | not worth it |
+| one key layout per attribute set shape | Chambers, Ungar and Lee, OOPSLA 1989 | census of key lists | about 9 % of the arena, no time measured | memory only |
+| a bytecode VM instead of the tree walk | Ierusalimschy, de Figueiredo and Celes, "The implementation of Lua 5.0", JUCS 2005 | `perf stat` branch misses | about 1.6 % of cycles at most | not worth it |
+
+None of these needs precompiled IR.
+
+### Multi-argument calls
+
+iets applies a curried function one argument at a time. `a: b: e` applied
+to two arguments makes a closure for `b: e` and calls it at once. The
+prototype binds the second argument straight into a new frame over the
+first one, and makes no closure. The profile still records one frame per
+lambda, and an error prints the same trace. Means of 20 runs on server
+and of 3 on outpaths:
+
+| workload | workers | base | multi-argument calls |
+|---|---|---|---|
+| nixos-server | 1 | 893 ms | 875 ms (−2.1 %) |
+| nixos-server | 4 | 471 ms | 459 ms (−2.6 %) |
+| outpaths 0/8 | 1 | 21.48 s | 20.49 s (−4.6 %) |
+| outpaths 0/8 | 4 | 8.03 s | 7.97 s (−0.7 %, inside the noise) |
+
+It saves 0.6 % of the instructions on server, so most of the gain is
+the allocation and the memory traffic it removes. The 9,482 outpaths jobs
+and the server drvPath are the same as the base.
+
+### A loop for tail positions
+
+`let`, `with`, `if` and `assert` add nothing to an error trace, so their
+body can run in the same `eval` frame instead of a nested one. The
+prototype makes `eval` a loop for those four. It runs the same number of
+instructions, saves 1.8 % on server and 1.9 % on outpaths at one worker,
+and 1.5 % and 0.5 % at four. That is under the bar alone. It is a small
+change, so it is worth measuring again together with multi-argument calls.
+
+### Full laziness
+
+Full laziness moves an expression that does not use a function's own
+arguments out of the function, so all calls share one result. The census
+gives each call node the innermost frame it reads, and counts a call that
+runs again over the same frame: that call would have been shared. Small
+expressions with a known answer check the census, and its "reads no outer
+frame" agrees with the compiler's `closed` flag on 36,991 of 37,179
+functions.
+
+| workload, 1 worker | calls | calls that repeat | function calls inside them | thunks inside them |
+|---|---|---|---|---|
+| nixos-server | 4.11 M | 51,443 (1.3 %) | 77,012 of 5.00 M (1.5 %) | 157,117 of 6.63 M (2.4 %) |
+| outpaths 0/8 | 57.4 M | 827,628 (1.4 %) | 1.61 M | 2.18 M of 91.4 M (2.4 %) |
+
+So floating saves at most about 2 % of the work, before the cost of the
+floated bindings. It would also change how often `trace` prints.
+
+### Attribute set shapes
+
+An attribute is 16 bytes: a name, a position and a value. nixos-server
+makes 1.99 M attribute sets with 9.98 M attributes, but only 72,634
+distinct lists of names and positions. A set that pointed to a shared
+list would keep only its values: 8 bytes per attribute and 8 for the
+pointer. That saves about 55 MB of the 627 MB arena on nixos-server, and
+330 to 440 MB of each 4.2 GB worker on outpaths. Every lookup would follow
+one more pointer, and the change touches every reader of a set. The time
+it costs is not measured.
+
+### Dispatch
+
+A warm nixos-server run executes 9.23 G instructions in 4.09 G cycles,
+2.25 per cycle. 1.37 % of the branches miss, and 17.5 % of those misses
+are in `Evaluator::eval`: about 4.2 M misses, or about 1.6 % of the cycles.
+The instruction cache barely misses. A bytecode VM or merged nodes would
+remove part of that 1.6 %.
+
 ## Versioning precompiled IR
 
 Precompiled IR is valid only for a compiler that produces the same IR and
@@ -242,6 +327,9 @@ key with the format and semantics numbers above. Then a patch release
 keeps the warm cache, and users skip the 28 % first-run cost on nixos-server
 after each upgrade.
 
-A second part needs no shipping either. Remember the `stat` of a store path
+Multi-argument calls are worth landing on their own: −2.1 % on server and
+−4.6 % on outpaths at one worker, in about 40 lines.
+
+A third part needs no shipping either. Remember the `stat` of a store path
 for the run. That removes most of the 21,365 `statx` calls a bundle would
 have removed.

@@ -1,0 +1,78 @@
+diff --git i/src/eval/mod.rs w/src/eval/mod.rs
+index 75c2c995..b9701f35 100644
+--- i/src/eval/mod.rs
++++ w/src/eval/mod.rs
+@@ -1540,9 +1540,29 @@ impl Evaluator {
+         while !args.is_empty() {
+             match cur.view() {
+                 Value::Lambda(l) => {
++                    // `a: b: e` applied to two arguments binds `b` in the env
++                    // of `a` directly, without the closure in between
++                    let (mut fenv, mut lam) = (l.env, l.lam);
++                    while args.len() >= 2
++                        && let Ir::Lambda(inner) = lam.body
++                    {
++                        self.nr_function_calls += 1;
++                        let d = self.prof_enter(pos, lam.name);
++                        fenv = self.bind_lambda(fenv, lam, args[0], pos)?;
++                        self.prof.unwind(d);
++                        lam = inner;
++                        args = &args[1..];
++                    }
+                     self.nr_function_calls += 1;
+-                    let d = self.prof_enter(pos, l.lam.name);
+-                    cur = self.call_lambda(l, args[0], pos)?;
++                    let d = self.prof_enter(pos, lam.name);
++                    let env2 = self.bind_lambda(fenv, lam, args[0], pos)?;
++                    cur = self.eval(env2, lam.body).map_err(|mut e| {
++                        e.add_trace(lam.pos, format!("while calling {}", self.lambda_desc(lam)));
++                        if !pos.is_none() {
++                            e.add_trace(pos, "from call site");
++                        }
++                        e
++                    })?;
+                     self.prof.unwind(d);
+                     args = &args[1..];
+                 }
+@@ -1613,7 +1633,25 @@ impl Evaluator {
+ 
+     fn call_lambda(&mut self, l: &'static LambdaObj, arg: Word, pos: Pos) -> EvalResult<Word> {
+         let lam: &'static LambdaIr = l.lam;
+-        let env2 = self.arena.alloc_env(Some(l.env), lam.nslots());
++        let env2 = self.bind_lambda(l.env, lam, arg, pos)?;
++        self.eval(env2, lam.body).map_err(|mut e| {
++            e.add_trace(lam.pos, format!("while calling {}", self.lambda_desc(lam)));
++            if !pos.is_none() {
++                e.add_trace(pos, "from call site");
++            }
++            e
++        })
++    }
++
++    /// The env of a call of `lam` closed over `fenv`, its parameters bound.
++    fn bind_lambda(
++        &mut self,
++        fenv: &'static EnvObj,
++        lam: &'static LambdaIr,
++        arg: Word,
++        pos: Pos,
++    ) -> EvalResult<&'static EnvObj> {
++        let env2 = self.arena.alloc_env(Some(fenv), lam.nslots());
+         let slots = env2.slots_n(lam.nslots());
+         match &lam.param {
+             ParamIr::Ident => slots[0].set(arg),
+@@ -1687,13 +1725,7 @@ impl Evaluator {
+                 }
+             }
+         }
+-        self.eval(env2, lam.body).map_err(|mut e| {
+-            e.add_trace(lam.pos, format!("while calling {}", self.lambda_desc(lam)));
+-            if !pos.is_none() {
+-                e.add_trace(pos, "from call site");
+-            }
+-            e
+-        })
++        Ok(env2)
+     }
+ 
+     fn lambda_name(&self, lam: &LambdaIr) -> String {

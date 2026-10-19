@@ -1,9 +1,9 @@
 diff --git i/src/aotstats.rs w/src/aotstats.rs
 new file mode 100644
-index 00000000..ba385745
+index 00000000..74144987
 --- /dev/null
 +++ w/src/aotstats.rs
-@@ -0,0 +1,480 @@
+@@ -0,0 +1,663 @@
 +//! Scratch census for the precompiled-IR exploration; not for landing.
 +use std::collections::HashMap;
 +use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
@@ -14,6 +14,8 @@ index 00000000..ba385745
 +pub static WITH_MISS_PROBES: AtomicU64 = AtomicU64::new(0);
 +pub static WITH_GLOBAL: AtomicU64 = AtomicU64::new(0);
 +pub static WITH_CHAIN_LEN: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
++pub static CLOSED_MISMATCH: AtomicU64 = AtomicU64::new(0);
++pub static CLOSED_CHECKED: AtomicU64 = AtomicU64::new(0);
 +pub static EAGER_OK: AtomicU64 = AtomicU64::new(0);
 +pub static EAGER_ERR: AtomicU64 = AtomicU64::new(0);
 +
@@ -87,6 +89,8 @@ index 00000000..ba385745
 +        WITH_CHAIN_LEN.iter().map(l).collect::<Vec<_>>(),
 +    );
 +    dump_dup();
++    dump_fl();
++    dump_shapes();
 +    eprintln!("AOT eager ok={} err={}", l(&EAGER_OK), l(&EAGER_ERR));
 +    if let Some(p) = std::env::var_os("IETS_AOT_ERR_TO")
 +        && let Some(e) = ERR_SITES.lock().unwrap().as_ref()
@@ -469,6 +473,17 @@ index 00000000..ba385745
 +    let mut m = Memo::new();
 +    shape(root, &mut m, d);
 +    walk(root, &m, d, &mut Default::default());
++    let mut fd = HashMap::new();
++    for &k in m.keys() {
++        let ir = unsafe { &*(k as *const Ir) };
++        if let Ir::Lambda(l) = ir {
++            let mine = free_depth(ir, &mut fd) == 0;
++            if mine != l.closed {
++                CLOSED_MISMATCH.fetch_add(1, Relaxed);
++            }
++            CLOSED_CHECKED.fetch_add(1, Relaxed);
++        }
++    }
 +}
 +
 +pub fn dump_dup() {
@@ -484,8 +499,176 @@ index 00000000..ba385745
 +        d.closed_dup
 +    );
 +}
++
++/// The envs a node reads, as a mask of depths relative to the env it runs
++/// in (bit 63 stands for any depth above 62). The innermost one decides the
++/// value, because every other one hangs off it. A child in a new frame
++/// shifts by one, and a read of that frame is internal.
++fn free_depth(ir: IrRef, memo: &mut HashMap<usize, u64>) -> u64 {
++    let k = ir as *const Ir as usize;
++    if let Some(&r) = memo.get(&k) {
++        return r;
++    }
++    let mut r: u64 = 0;
++    let mut at = |e: IrRef, shift: u32, r: &mut u64, memo: &mut HashMap<usize, u64>| {
++        *r |= free_depth(e, memo) >> shift;
++    };
++    let bit = |d: u32| 1u64 << d.min(63);
++    match ir {
++        Ir::Local { depth, .. } => r = bit(*depth),
++        Ir::WithVar { withs, .. } => r = withs.iter().fold(0, |m, &d| m | bit(d)),
++        Ir::Lambda(l) => {
++            if let ParamIr::Formals { formals, .. } = &l.param {
++                for f in formals.iter() {
++                    if let Some(e) = f.default {
++                        at(e, 1, &mut r, memo);
++                    }
++                }
++            }
++            at(l.body, 1, &mut r, memo);
++        }
++        Ir::Let(l) => {
++            for b in l.binds.iter() {
++                let s = if b.scope == crate::compile::ir::BindScope::Outer { 0 } else { 1 };
++                at(b.value, s, &mut r, memo);
++            }
++            for e in l.from.iter() {
++                at(e, 1, &mut r, memo);
++            }
++            at(l.body, 1, &mut r, memo);
++        }
++        Ir::Attrs(a) => {
++            use crate::compile::ir::BindScope;
++            for b in a.binds.iter() {
++                let s = match (a.rec, b.scope) {
++                    (_, BindScope::Outer) => 0,
++                    (true, _) | (false, BindScope::From) => 1,
++                    (false, _) => 0,
++                };
++                at(b.value, s, &mut r, memo);
++            }
++            for e in a.from.iter() {
++                at(e, u32::from(a.rec), &mut r, memo);
++            }
++            for db in a.dynamic.iter() {
++                at(db.name, u32::from(a.rec), &mut r, memo);
++                at(db.value, u32::from(a.rec), &mut r, memo);
++            }
++        }
++        Ir::With { scope, body, .. } => {
++            at(scope, 0, &mut r, memo);
++            at(body, 1, &mut r, memo);
++        }
++        _ => children(ir, &mut |c| at(c, 0, &mut r, memo)),
++    }
++    memo.insert(k, r);
++    r
++}
++
++#[derive(Default)]
++pub struct Fl {
++    depth: HashMap<usize, u64>,
++    seen: std::collections::HashSet<(usize, usize)>,
++    evals: u64,
++    closed_evals: u64,
++    repeats: u64,
++    inside: u32,
++    rep_calls: u64,
++    rep_thunks: u64,
++    by_depth: [u64; 6],
++}
++
++pub static FL: Mutex<Option<Fl>> = Mutex::new(None);
++
++/// Call before an `Apply` runs: `Some` when this one repeats an earlier
++/// evaluation of the same node over the same env it reads, outermost only.
++pub fn fl_enter(ir: IrRef, env: &'static crate::runtime::EnvObj) -> u8 {
++    let mut g = FL.lock().unwrap();
++    let f = g.get_or_insert_with(Default::default);
++    f.evals += 1;
++    let mut memo = std::mem::take(&mut f.depth);
++    let mask = free_depth(ir, &mut memo);
++    f.depth = memo;
++    let d = (mask != 0).then(|| mask.trailing_zeros());
++    let key_env = match d {
++        None => {
++            f.closed_evals += 1;
++            0
++        }
++        Some(d) => {
++            let mut e = env;
++            for _ in 0..d {
++                e = e.up().expect("compile-time depth is valid");
++            }
++            e as *const _ as usize
++        }
++    };
++    if f.seen.insert((ir as *const Ir as usize, key_env)) {
++        return 0;
++    }
++    f.repeats += 1;
++    f.by_depth[d.map_or(5, |d| d.min(4) as usize)] += 1;
++    f.inside += 1;
++    if f.inside == 1 { 2 } else { 1 }
++}
++
++pub fn fl_exit(state: u8, calls: u64, thunks: u64) {
++    if state == 0 {
++        return;
++    }
++    let mut g = FL.lock().unwrap();
++    let f = g.as_mut().unwrap();
++    f.inside -= 1;
++    if state == 2 {
++        f.rep_calls += calls;
++        f.rep_thunks += thunks;
++    }
++}
++
++pub fn dump_fl() {
++    let g = FL.lock().unwrap();
++    let Some(f) = g.as_ref() else { return };
++    eprintln!(
++        "AOT fl closed_check={}/{} mismatches apply_evals={} closed_evals={} repeats={} by_depth(0..4,closed)={:?} rep_calls={} rep_thunks={}",
++        CLOSED_MISMATCH.load(Relaxed), CLOSED_CHECKED.load(Relaxed), f.evals, f.closed_evals, f.repeats, f.by_depth, f.rep_calls, f.rep_thunks
++    );
++}
++
++pub static ATTRS: Mutex<Vec<usize>> = Mutex::new(Vec::new());
++
++pub fn dump_shapes() {
++    let v = ATTRS.lock().unwrap();
++    if v.is_empty() {
++        return;
++    }
++    let mut keys: std::collections::HashSet<Vec<u32>> = Default::default();
++    let mut keys_pos: std::collections::HashSet<Vec<(u32, u32)>> = Default::default();
++    let (mut entries, mut shape_entries, mut shape_pos_entries) = (0u64, 0u64, 0u64);
++    for &p in v.iter() {
++        let a = unsafe { &*(p as *const crate::runtime::value::AttrsObj) };
++        let raw = a.attrs_raw();
++        entries += raw.len() as u64;
++        let k: Vec<u32> = raw.iter().map(|x| x.sym.0).collect();
++        let kp: Vec<(u32, u32)> = raw.iter().map(|x| (x.sym.0, x.pos.0)).collect();
++        if keys.insert(k) {
++            shape_entries += raw.len() as u64;
++        }
++        if keys_pos.insert(kp) {
++            shape_pos_entries += raw.len() as u64;
++        }
++    }
++    eprintln!(
++        "AOT shapes sets={} entries={} distinct_keys={} their_entries={} distinct_keys_pos={} their_entries={}",
++        v.len(),
++        entries,
++        keys.len(),
++        shape_entries,
++        keys_pos.len(),
++        shape_pos_entries
++    );
++}
 diff --git i/src/eval/mod.rs w/src/eval/mod.rs
-index 75c2c995..d8670ae7 100644
+index 75c2c995..e13ff4a6 100644
 --- i/src/eval/mod.rs
 +++ w/src/eval/mod.rs
 @@ -790,6 +790,19 @@ impl Evaluator {
@@ -581,7 +764,34 @@ index 75c2c995..d8670ae7 100644
          self.nr_thunks += 1;
          self.arena.mk_thunk(env, ir)
      }
-@@ -1770,7 +1835,7 @@ impl Evaluator {
+@@ -1611,6 +1676,26 @@ impl Evaluator {
+         Ok(cur)
+     }
+ 
++    fn eval_apply_node(
++        &mut self,
++        env: &'static EnvObj,
++        func: IrRef,
++        args: &'static [IrRef],
++        pos: Pos,
++    ) -> EvalResult<Word> {
++        let f = self.eval(env, func)?;
++        let mut buf: [Word; 8] = [Word::EMPTY; 8];
++        if args.len() <= 8 {
++            for (i, a) in args.iter().enumerate() {
++                buf[i] = self.maybe_thunk_e(env, a);
++            }
++            self.apply(f, &buf[..args.len()], pos)
++        } else {
++            let v: Vec<Word> = args.iter().map(|a| self.maybe_thunk_e(env, a)).collect();
++            self.apply(f, &v, pos)
++        }
++    }
++
+     fn call_lambda(&mut self, l: &'static LambdaObj, arg: Word, pos: Pos) -> EvalResult<Word> {
+         let lam: &'static LambdaIr = l.lam;
+         let env2 = self.arena.alloc_env(Some(l.env), lam.nslots());
+@@ -1770,24 +1855,21 @@ impl Evaluator {
              Ir::List(items) => {
                  let l = self.arena.alloc_list_as(items.len(), Stat::ListLit);
                  for (c, item) in l.cells().iter().zip(items.iter()) {
@@ -590,21 +800,31 @@ index 75c2c995..d8670ae7 100644
                      c.set(w);
                  }
                  Ok(Word::from_ref(l))
-@@ -1781,11 +1846,11 @@ impl Evaluator {
-                 let mut buf: [Word; 8] = [Word::EMPTY; 8];
-                 if args.len() <= 8 {
-                     for (i, a) in args.iter().enumerate() {
--                        buf[i] = self.maybe_thunk(env, a);
-+                        buf[i] = self.maybe_thunk_e(env, a);
-                     }
-                     self.apply(f, &buf[..args.len()], *pos)
-                 } else {
--                    let v: Vec<Word> = args.iter().map(|a| self.maybe_thunk(env, a)).collect();
-+                    let v: Vec<Word> = args.iter().map(|a| self.maybe_thunk_e(env, a)).collect();
-                     self.apply(f, &v, *pos)
-                 }
              }
-@@ -1970,7 +2035,13 @@ impl Evaluator {
+             Ir::Lambda(l) => Ok(self.arena.mk_lambda(env, l)),
+             Ir::Apply { func, args, pos } => {
+-                let f = self.eval(env, func)?;
+-                let mut buf: [Word; 8] = [Word::EMPTY; 8];
+-                if args.len() <= 8 {
+-                    for (i, a) in args.iter().enumerate() {
+-                        buf[i] = self.maybe_thunk(env, a);
+-                    }
+-                    self.apply(f, &buf[..args.len()], *pos)
+-                } else {
+-                    let v: Vec<Word> = args.iter().map(|a| self.maybe_thunk(env, a)).collect();
+-                    self.apply(f, &v, *pos)
++                if !crate::aotstats::on() {
++                    return self.eval_apply_node(env, func, args, *pos);
+                 }
++                let st = crate::aotstats::fl_enter(ir, env);
++                let (c0, t0) = (self.nr_function_calls, self.nr_thunks);
++                let r = self.eval_apply_node(env, func, args, *pos);
++                crate::aotstats::fl_exit(st, self.nr_function_calls - c0, self.nr_thunks - t0);
++                r
+             }
+             Ir::Let(l) => {
+                 let env2 = self.alloc_rec_env(env, l.binds, l.from, false);
+@@ -1970,7 +2052,13 @@ impl Evaluator {
      ) -> EvalResult<Word> {
          let mut e = env;
          let mut walked = 0u32;
@@ -619,7 +839,7 @@ index 75c2c995..d8670ae7 100644
              for _ in walked..d {
                  e = e.up().expect("compile-time depth is valid");
              }
-@@ -1983,8 +2054,18 @@ impl Evaluator {
+@@ -1983,8 +2071,18 @@ impl Evaluator {
              )?;
              e.slot(0).set(Word::from_ref(attrs));
              if let Some(a) = attrs.get(sym) {
@@ -638,7 +858,7 @@ index 75c2c995..d8670ae7 100644
          }
          if let Some(w) = self.globals.table.get(&sym) {
              return Ok(*w);
-@@ -2228,7 +2309,7 @@ impl Evaluator {
+@@ -2228,7 +2326,7 @@ impl Evaluator {
              for b in a.binds.iter() {
                  let w = match b.scope {
                      BindScope::From => self.maybe_thunk(inherit_env.unwrap(), b.value),
@@ -647,7 +867,7 @@ index 75c2c995..d8670ae7 100644
                  };
                  entries.push((b.sym, b.pos, w));
              }
-@@ -2277,7 +2358,7 @@ impl Evaluator {
+@@ -2277,7 +2375,7 @@ impl Evaluator {
              for (i, b) in a.binds.iter().enumerate() {
                  let w = match b.scope {
                      BindScope::From => self.maybe_thunk(inherit_env.unwrap(), b.value),
@@ -656,7 +876,7 @@ index 75c2c995..d8670ae7 100644
                  };
                  out.init(i, b.sym, b.pos, w);
              }
-@@ -2619,6 +2700,24 @@ impl ArithOp {
+@@ -2619,6 +2717,24 @@ impl ArithOp {
  }
  
  /// Best-effort position of an IR node, for error messages.
@@ -693,3 +913,17 @@ index 210498d3..ea526eab 100644
  pub mod api;
  pub mod argv;
  pub mod build;
+diff --git i/src/runtime/value.rs w/src/runtime/value.rs
+index 0be40fc0..9912a123 100644
+--- i/src/runtime/value.rs
++++ w/src/runtime/value.rs
+@@ -1211,6 +1211,9 @@ impl Arena {
+             });
+             #[cfg(feature = "stats2")]
+             self.stats.census.note_attrs(p, bucket.attrs_origin(), n);
++            if crate::aotstats::on() {
++                crate::aotstats::ATTRS.lock().unwrap().push(p as usize);
++            }
+             &mut *p
+         }
+     }
