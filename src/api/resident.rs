@@ -250,3 +250,39 @@ impl Drop for Resident {
         }
     }
 }
+
+/// A package `Resident::search` found.
+#[derive(Clone, Debug)]
+pub struct Package {
+    /// Below the searched attribute, dotted.
+    pub attr: String,
+    pub pname: String,
+    pub version: String,
+    pub description: String,
+}
+
+impl Resident {
+    /// The packages below the attribute `attr` that every regex matches,
+    /// walked as `iets search` walks a package set; at most `max`.
+    pub fn search(
+        &self,
+        attr: &str,
+        regexes: Vec<String>,
+        max: Option<usize>,
+    ) -> Result<Vec<Package>, String> {
+        let attr = attr.to_owned();
+        self.ask(move |ev, root| {
+            let v = root.select(ev, &attr)?;
+            let found = crate::cli::search::packages(ev, v, &regexes, max)?;
+            Ok(found
+                .into_iter()
+                .map(|[attr, pname, version, description]| Package {
+                    attr,
+                    pname,
+                    version,
+                    description,
+                })
+                .collect())
+        })
+    }
+}

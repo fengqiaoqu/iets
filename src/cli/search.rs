@@ -634,6 +634,37 @@ fn decode(b: &[u8]) -> Option<Vec<Entry>> {
     Some(index)
 }
 
+/// The packages below `w`, walked as the native search walks a package set,
+/// that every regex in `regexes` matches: `(attribute path, pname, version,
+/// description)` in attribute order, at most `max`.
+pub(crate) fn packages(
+    ev: &mut Evaluator,
+    w: Word,
+    regexes: &[String],
+    max: Option<usize>,
+) -> Result<Vec<[String; 4]>, String> {
+    let res = compile_all(regexes)?;
+    let mut index = Vec::new();
+    visit(ev, w, &mut Vec::new(), true, &mut index, true).map_err(|e| {
+        report(ev, &e);
+        e.msg.clone()
+    })?;
+    let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+    Ok(index
+        .iter()
+        .filter(|e| matched(e, &res, &[]).is_some())
+        .take(max.unwrap_or(usize::MAX))
+        .map(|e| {
+            [
+                text(&e.path),
+                text(&e.pname),
+                text(&e.version),
+                text(&e.desc),
+            ]
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
