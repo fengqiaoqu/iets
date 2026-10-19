@@ -1,4 +1,4 @@
-{ lib, stdenv, runCommand, nix, nushell, ast-grep, craneLib, commonArgs, sources, iets, ietsStatic, ietsRiscv64, fuzz, e2eTest, e2eCases }:
+{ lib, stdenv, runCommand, nix, nix-eval-jobs, path, nushell, ast-grep, craneLib, commonArgs, sources, iets, ietsStatic, ietsRiscv64, fuzz, e2eTest, e2eCases }:
 let
   # the dev profile, as `cargo test` in the dev shell: the release profile is
   # fat LTO, minutes for no extra coverage
@@ -27,6 +27,19 @@ in
     # build without a sandbox
     postUnpack = "export HOME=$(mktemp -d)";
   });
+  # every nixpkgs drv against nix-eval-jobs (tests/nixpkgs_eval.rs), with a
+  # release build to keep it short
+  nixpkgs-eval =
+    let
+      args = commonArgs // { src = sources.test; };
+    in
+    craneLib.cargoNextest (args // {
+      cargoArtifacts = craneLib.buildDepsOnly (args // { cargoCheckExtraArgs = "--all-targets"; });
+      doInstallCargoArtifacts = false;
+      cargoNextestExtraArgs = "--run-ignored only -E 'binary(nixpkgs_eval)'";
+      IETS_TEST_NIXPKGS = "${path}";
+      IETS_TEST_NIX_EVAL_JOBS = lib.getExe nix-eval-jobs;
+    });
   # nextest runs no doctests
   doctest = craneLib.cargoDocTest withDev;
   doc = craneLib.cargoDoc (withDev // { RUSTDOCFLAGS = "-D warnings"; });
