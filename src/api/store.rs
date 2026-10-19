@@ -7,7 +7,8 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 pub use crate::remote::event::Event;
-use crate::remote::worker::{Connection, Options, Transport};
+pub use crate::remote::worker::Options;
+use crate::remote::worker::{Connection, Transport};
 
 /// What the daemon reports while it works: build logs, phases, failures.
 pub type OnEvent = Arc<dyn Fn(&Event) + Send + Sync>;
@@ -28,7 +29,7 @@ pub enum GcAction {
 
 pub struct Store {
     transport: Transport,
-    options: Options,
+    options: Mutex<Options>,
     on_event: OnEvent,
     conn: Mutex<Option<Connection>>,
 }
@@ -40,7 +41,7 @@ impl Store {
             .ok_or_else(|| format!("'{url}' is not a store iets can reach"))?;
         Ok(Store {
             transport,
-            options,
+            options: Mutex::new(options),
             on_event,
             conn: Mutex::new(None),
         })
@@ -58,7 +59,12 @@ impl Store {
         let on_event = self.on_event.clone();
         let mut events = move |e: Event| on_event(&e);
         if guard.is_none() {
-            let c = Connection::open_with(&self.transport, &self.options, &mut events)
+            let options = self
+                .options
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone();
+            let c = Connection::open_with(&self.transport, &options, &mut events)
                 .map_err(|e| e.to_string())?;
             *guard = Some(c);
         }
@@ -69,6 +75,14 @@ impl Store {
             *guard = None;
         }
         r.map_err(|e| e.to_string())
+    }
+
+    /// Options for the calls that follow, such as substituters as
+    /// `overrides`: the daemon takes them at the handshake, so the
+    /// connection is opened again.
+    pub fn set_options(&self, options: Options) {
+        *self.options.lock().unwrap_or_else(|p| p.into_inner()) = options;
+        *self.conn.lock().unwrap_or_else(|p| p.into_inner()) = None;
     }
 
     /// Whether the daemon trusts this user; `None` when it does not say.
