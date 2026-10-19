@@ -7,7 +7,7 @@ mod hermetic;
 
 use std::fs;
 
-use e2e::{Store, code, json, ok, pipe, stdout};
+use e2e::{Store, code, json, ok, parse, pipe, stdout};
 use serde_json::{Value, json};
 
 const HELLO: &str = r#"derivation {
@@ -237,14 +237,14 @@ fn composition() {
         s.iets().args(["plumbing", "plan", &hello]),
         s.iets().args(["plumbing", "build", "--roots", "-"]),
     );
-    let piped: Value = serde_json::from_slice(&piped.stdout).unwrap();
+    let piped = parse(&piped);
     let out = piped["outcomes"][0]["outputs"]["out"].as_str().unwrap();
     assert!(out.ends_with("-plumb-hello"), "{piped}");
     let via = pipe(
         s.iets().args(["plumbing", "resolve", "hello.nix"]),
         s.iets().args(["plumbing", "missing", "--roots", "-"]),
     );
-    let via: Value = serde_json::from_slice(&via.stdout).unwrap();
+    let via = parse(&via);
     assert_eq!(via["willBuild"], json!([]), "already built");
 
     // a closure in no store: only --dump-drvs carries it across the pipe
@@ -263,14 +263,14 @@ fn composition() {
         &mut resolve(),
         s.iets().args(["plumbing", "plan", "--roots", "-"]),
     );
-    let c: Value = serde_json::from_slice(&c.stdout).unwrap();
+    let c = parse(&c);
     assert_eq!(c["storeDrvs"], 0, "{c}");
     assert_eq!(c["drvs"].as_array().unwrap().len(), 2, "{c}");
     let cb = pipe(
         &mut resolve(),
         s.iets().args(["plumbing", "build", "--roots", "-"]),
     );
-    let cb: Value = serde_json::from_slice(&cb.stdout).unwrap();
+    let cb = parse(&cb);
     assert_eq!(cb["outcomes"][0]["success"], true, "{cb}");
 }
 

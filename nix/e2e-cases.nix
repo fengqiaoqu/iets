@@ -27,7 +27,6 @@ in
     packages = [ pkgs.jq pkgs.nix-eval-jobs ];
     env = "NEJ=${pkgs.nix-eval-jobs}/bin/nix-eval-jobs";
   };
-  build-e2e = { };
   flaketest = { };
   grpc-e2e = {
     packages = [ nix-grpc-daemon ];

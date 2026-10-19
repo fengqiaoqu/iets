@@ -43,11 +43,7 @@ fn resolved(prog: &str) -> PathBuf {
 }
 
 impl Store {
-    /// `None` without `nix-daemon` on `PATH`.
-    pub fn start() -> Option<Store> {
-        Store::start_with(&[])
-    }
-
+    /// `None` without `nix-daemon` on `PATH`. `opts` go into nix.conf.
     pub fn start_with(opts: &[(&str, &str)]) -> Option<Store> {
         let daemon = which("nix-daemon")?;
         // a socket path has to fit in sun_path, and darwin's TMPDIR is long
@@ -127,14 +123,10 @@ impl Store {
             fs::copy(e.path(), dst.join(e.file_name())).unwrap();
         }
         let coreutils = resolved("ls");
-        let env = format!(
-            "{{ shell = \"{}\"; path = \"{}\"; system = \"{}\"; nonce = \"{}\"; }}\n",
-            self.shell.display(),
-            coreutils.parent().unwrap().display(),
-            system(),
-            self.nonce,
-        );
-        fs::write(dst.join("env.nix"), env).unwrap();
+        let env =
+            r#"{ shell = "@SHELL@"; path = "@PATH@"; system = "@SYSTEM@"; nonce = "@NONCE@"; }"#;
+        let path = coreutils.parent().unwrap().to_str().unwrap();
+        self.write("pkgs/env.nix", &env.replace("@PATH@", path));
     }
 
     /// Writes `template` to `name` in the store's dir, with `@SYSTEM@`,
@@ -230,11 +222,15 @@ pub fn stderr(o: &Output) -> String {
     String::from_utf8_lossy(&o.stderr).into_owned()
 }
 
+/// The stdout of `o` as JSON.
+pub fn parse(o: &Output) -> serde_json::Value {
+    serde_json::from_slice(&o.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}\n{}", stdout(o), stderr(o)))
+}
+
 /// The stdout of `c` as JSON. `c` must succeed.
 pub fn json(c: &mut Command) -> serde_json::Value {
-    let o = ok(c);
-    serde_json::from_slice(&o.stdout)
-        .unwrap_or_else(|e| panic!("{c:?}: {e}: {}", String::from_utf8_lossy(&o.stdout)))
+    parse(&ok(c))
 }
 
 /// The exit code of `c`.
