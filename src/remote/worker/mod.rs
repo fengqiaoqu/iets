@@ -101,6 +101,7 @@ pub const MIN_MINOR: u64 = 35;
 #[repr(u64)]
 enum Op {
     SetOptions = 19,
+    CollectGarbage = 20,
     QueryPathInfo = 26,
     QueryValidPaths = 31,
     AddIndirectRoot = 12,
@@ -1042,6 +1043,33 @@ impl Connection {
             wire::realisation(&wire::read_bytes(r, wire::MAX_STRING)?).map_err(conn)?;
         }
         Ok(BuildResult { path, status, msg })
+    }
+
+    /// `CollectGarbage` (gc-store.hh:GCOptions): `action` 0 gives the live
+    /// paths, 1 the dead, 2 deletes the dead, 3 deletes those of `paths`
+    /// that are dead. Gives the paths and the bytes freed.
+    pub fn collect_garbage(
+        &mut self,
+        action: u64,
+        paths: &[String],
+        ignore_liveness: bool,
+        max_freed: u64,
+        on_event: &mut dyn FnMut(Event),
+    ) -> Result<(Vec<String>, u64)> {
+        self.op(Op::CollectGarbage)?;
+        write_u64(self.w(), action)?;
+        write_strs(self.w(), paths)?;
+        write_u64(self.w(), u64::from(ignore_liveness))?;
+        write_u64(self.w(), max_freed)?;
+        // obsolete fields of older protocols
+        for _ in 0..3 {
+            write_u64(self.w(), 0)?;
+        }
+        self.process_stderr(on_event)?;
+        let paths = read_strs(self.r())?;
+        let freed = read_u64(self.r())?;
+        read_u64(self.r())?;
+        Ok((paths, freed))
     }
 
     /// `QueryMissing`; `paths` are derived paths, as for `BuildPathsWithResults`.

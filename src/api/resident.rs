@@ -200,6 +200,48 @@ impl Resident {
     }
 }
 
+impl Resident {
+    /// Builds the derivations the attribute `attr` evaluates to through the
+    /// store at `transport`, uploading what it lacks, and gives one output
+    /// path per derivation, in the order the evaluation found them.
+    pub fn build(
+        &self,
+        attr: &str,
+        transport: Transport,
+        options: Options,
+    ) -> Result<Vec<String>, String> {
+        use crate::api::build::{Dispatch, Root, Style, plan};
+        use crate::provenance::Provenance;
+        let attr = attr.to_owned();
+        self.ask(move |ev, root| {
+            let v = root.select(ev, &attr)?;
+            let mut found = Vec::new();
+            drv_roots(ev, v, &mut found).map_err(|e| {
+                api::report(ev, &e);
+                e.msg.clone()
+            })?;
+            let roots: Vec<Root> = found
+                .into_iter()
+                .map(|(drv, output)| Root {
+                    drv,
+                    output: output.unwrap_or_else(|| "out".into()),
+                })
+                .collect();
+            let plan = plan(ev, &Root::paths(&roots)).map_err(|e| e.to_string())?;
+            let style = Style {
+                quiet: true,
+                ..Style::detect()
+            };
+            let mut d = Dispatch::open(&transport, &options, plan, Provenance::snapshot(ev), style)
+                .map_err(|e| e.to_string())?;
+            let built = d
+                .realise(&roots, &|p| p.name().to_string())
+                .map_err(|e| e.to_string())?;
+            built.paths(&roots).map_err(|e| e.to_string())
+        })
+    }
+}
+
 impl Drop for Resident {
     fn drop(&mut self) {
         self.jobs.take();

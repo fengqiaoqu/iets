@@ -16,6 +16,7 @@ pub mod render;
 pub mod resident;
 pub mod run;
 pub mod shell_env;
+pub mod store;
 
 #[cfg(test)]
 mod concurrent_eval;
