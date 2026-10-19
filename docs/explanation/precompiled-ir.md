@@ -118,7 +118,10 @@ like the biggest single win. It is the smallest. nixos-server evaluates
 
 A resolved variable still forces the scope and looks the name up, so
 resolution can only remove the 1,191 missed lookups and a short walk up
-the environment. That is well under a millisecond of an 887 ms run. Of
+the environment. That is well under a millisecond of an 887 ms run. Outpaths
+chunk 0 of 8 at one worker gives the same picture: 280,090 `WithVar`
+evaluations, 96.3 % in the innermost `with`, and 10,330 missed lookups in a
+21 s run. Of
 the 15,178 `WithVar` thunks that were made, 81 % were never forced.
 
 ### Strictness
@@ -129,6 +132,14 @@ attribute), 2.05 million thunks come from sites that were forced every
 time. The upper bound for a strictness analysis is an oracle: run once,
 record those sites, then evaluate them directly on the next run. That is
 more than any sound analysis can prove.
+
+| workload, 1 worker | thunks made | forced | from always-forced sites | of those, at eligible sites |
+|---|---|---|---|---|
+| nixos-server | 6.63 M | 61 % | 2.70 M (41 %) | 2.05 M |
+| outpaths 0/8 | 91.4 M | 58 % | 33.2 M (36 %) | 18.8 M |
+
+Outpaths has a smaller share of always-forced thunks, so its oracle would
+gain no more than the nixos-server oracle below.
 
 | run, 1 worker | thunks made | wall | its control | max RSS, against control |
 |---|---|---|---|---|
