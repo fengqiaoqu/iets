@@ -3,6 +3,7 @@
 
 #![allow(dead_code)]
 
+use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -24,6 +25,8 @@ sandbox = false
 pub struct Store {
     dir: TempDir,
     daemon: Child,
+    shell: PathBuf,
+    nonce: String,
 }
 
 fn which(prog: &str) -> Option<PathBuf> {
@@ -72,12 +75,23 @@ impl Store {
             // kills the whole group
             .process_group(0);
         let daemon = cmd.spawn().expect("spawn nix-daemon");
-        let store = Store { dir, daemon };
+        let nonce = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+            .to_string();
+        let mut store = Store {
+            dir,
+            daemon,
+            shell: resolved("bash"),
+            nonce,
+        };
         store.write_pkgs();
         let deadline = Instant::now() + Duration::from_secs(30);
         while !store.socket().exists() {
+            let exited = store.daemon.try_wait().unwrap().is_some();
             assert!(
-                Instant::now() < deadline,
+                !exited && Instant::now() < deadline,
                 "no daemon socket: {}",
                 store.daemon_log()
             );
@@ -112,19 +126,28 @@ impl Store {
             let e = e.unwrap();
             fs::copy(e.path(), dst.join(e.file_name())).unwrap();
         }
-        let bash = resolved("bash");
         let coreutils = resolved("ls");
-        let nonce = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
         let env = format!(
-            "{{ shell = \"{}\"; path = \"{}\"; system = \"{}\"; nonce = \"{nonce}\"; }}\n",
-            bash.display(),
+            "{{ shell = \"{}\"; path = \"{}\"; system = \"{}\"; nonce = \"{}\"; }}\n",
+            self.shell.display(),
             coreutils.parent().unwrap().display(),
             system(),
+            self.nonce,
         );
         fs::write(dst.join("env.nix"), env).unwrap();
+    }
+
+    /// Writes `template` to `name` in the store's dir, with `@SYSTEM@`,
+    /// `@SHELL@` (an absolute bash) and `@NONCE@` filled in.
+    pub fn write(&self, name: &str, template: &str) -> PathBuf {
+        let text = template
+            .replace("@SYSTEM@", &system())
+            .replace("@SHELL@", self.shell.to_str().unwrap())
+            .replace("@NONCE@", &self.nonce);
+        let p = self.dir().join(name);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(&p, text).unwrap();
+        p
     }
 
     pub fn dir(&self) -> &Path {
@@ -201,6 +224,40 @@ pub fn ok(c: &mut Command) -> Output {
 
 pub fn stdout(o: &Output) -> String {
     String::from_utf8_lossy(&o.stdout).trim_end().to_string()
+}
+
+pub fn stderr(o: &Output) -> String {
+    String::from_utf8_lossy(&o.stderr).into_owned()
+}
+
+/// The stdout of `c` as JSON. `c` must succeed.
+pub fn json(c: &mut Command) -> serde_json::Value {
+    let o = ok(c);
+    serde_json::from_slice(&o.stdout)
+        .unwrap_or_else(|e| panic!("{c:?}: {e}: {}", String::from_utf8_lossy(&o.stdout)))
+}
+
+/// The exit code of `c`.
+pub fn code(c: &mut Command) -> i32 {
+    c.output().expect("spawn").status.code().unwrap_or(-1)
+}
+
+/// `a | b`: `b` reads the stdout of `a`, which must succeed.
+pub fn pipe(a: &mut Command, b: &mut Command) -> Output {
+    let first = ok(a);
+    let mut child = b
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(&first.stdout)
+        .unwrap();
+    child.wait_with_output().unwrap()
 }
 
 /// A Store, or an early return from a test that has no `nix-daemon`.

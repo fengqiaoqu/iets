@@ -33,6 +33,5 @@ in
     packages = [ nix-grpc-daemon ];
     env = "DAEMON=${nix-grpc-daemon}";
   };
-  plumbing-e2e = { };
   prefetch-e2e = { };
 }
