@@ -222,6 +222,18 @@ pub fn stderr(o: &Output) -> String {
     String::from_utf8_lossy(&o.stderr).into_owned()
 }
 
+/// The sorted names in `dir`, none if it is missing.
+pub fn ls(dir: &Path) -> Vec<String> {
+    let mut v: Vec<String> = fs::read_dir(dir)
+        .map(|d| {
+            d.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    v.sort();
+    v
+}
+
 /// The stdout of `o` as JSON.
 pub fn parse(o: &Output) -> serde_json::Value {
     serde_json::from_slice(&o.stdout)

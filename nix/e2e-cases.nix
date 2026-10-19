@@ -22,10 +22,6 @@ in
 {
   classic-e2e = { setup = "${leftovers}"; };
   daemon-e2e = { packages = [ pkgs.jq ]; };
-  evaljobs-flags = {
-    packages = [ pkgs.jq pkgs.nix-eval-jobs ];
-    env = "NEJ=${pkgs.nix-eval-jobs}/bin/nix-eval-jobs";
-  };
   flaketest = { };
   grpc-e2e = {
     packages = [ nix-grpc-daemon ];

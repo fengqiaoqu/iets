@@ -249,7 +249,7 @@ iets eval-jobs --no-instantiate demo.nix
 
 Those are the JSON lines nix-eval-jobs 2.35 prints, and the flags you
 already pass from Hydra or nixpkgs CI work as they are
-(`scripts/evaljobs-flags.nu` compares both tools). Check these differences
+(`tests/e2e_evaljobs.rs` compares both tools). Check these differences
 before you swap it in:
 
 - `--workers N` counts worker processes. The default is the CPU count,
