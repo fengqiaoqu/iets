@@ -1,0 +1,350 @@
+diff --git i/src/aotstats.rs w/src/aotstats.rs
+new file mode 100644
+index 00000000..3f9a7e87
+--- /dev/null
++++ w/src/aotstats.rs
+@@ -0,0 +1,155 @@
++//! Scratch census for the precompiled-IR exploration; not for landing.
++use std::collections::HashMap;
++use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
++use std::sync::{Mutex, OnceLock};
++
++pub static WITH_EVALS: AtomicU64 = AtomicU64::new(0);
++pub static WITH_HIT_AT: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
++pub static WITH_MISS_PROBES: AtomicU64 = AtomicU64::new(0);
++pub static WITH_GLOBAL: AtomicU64 = AtomicU64::new(0);
++pub static WITH_CHAIN_LEN: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
++pub static EAGER_OK: AtomicU64 = AtomicU64::new(0);
++pub static EAGER_ERR: AtomicU64 = AtomicU64::new(0);
++
++#[derive(Default)]
++pub struct Site {
++    pub created: u64,
++    pub forced: u64,
++    pub tag: u8,
++    pub pos: u64,
++    pub elig: bool,
++}
++
++thread_local! { pub static ELIG: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
++
++pub static SITES: Mutex<Option<HashMap<usize, Site>>> = Mutex::new(None);
++
++pub fn on() -> bool {
++    static ON: OnceLock<bool> = OnceLock::new();
++    *ON.get_or_init(|| {
++        let on = std::env::var_os("IETS_AOT_STATS").is_some();
++        if on {
++            *SITES.lock().unwrap() = Some(HashMap::new());
++            unsafe { libc::atexit(dump) };
++        }
++        on
++    })
++}
++
++/// Sites (pos, tag) to evaluate eagerly, read from `IETS_AOT_EAGER`.
++pub fn eager() -> Option<&'static std::collections::HashSet<(u64, u8)>> {
++    static SET: OnceLock<Option<std::collections::HashSet<(u64, u8)>>> = OnceLock::new();
++    SET.get_or_init(|| {
++        let p = std::env::var_os("IETS_AOT_EAGER")?;
++        let s = std::fs::read_to_string(p).ok()?;
++        Some(
++            s.lines()
++                .filter_map(|l| {
++                    let mut it = l.split_whitespace();
++                    Some((it.next()?.parse().ok()?, it.next()?.parse().ok()?))
++                })
++                .collect(),
++        )
++    })
++    .as_ref()
++}
++
++pub fn created(ir: usize, tag: u8, pos: u64) {
++    let mut g = SITES.lock().unwrap();
++    let s = g.as_mut().unwrap().entry(ir).or_default();
++    s.created += 1;
++    s.tag = tag;
++    s.pos = pos;
++    s.elig |= ELIG.with(|e| e.get());
++}
++
++pub fn forced(ir: usize) {
++    let mut g = SITES.lock().unwrap();
++    if let Some(s) = g.as_mut().unwrap().get_mut(&ir) {
++        s.forced += 1;
++    }
++}
++
++extern "C" fn dump() {
++    let l = |a: &AtomicU64| a.load(Relaxed);
++    eprintln!(
++        "AOT with evals={} hit_at={:?} miss_probes={} global={} chain_len={:?}",
++        l(&WITH_EVALS),
++        WITH_HIT_AT.iter().map(l).collect::<Vec<_>>(),
++        l(&WITH_MISS_PROBES),
++        l(&WITH_GLOBAL),
++        WITH_CHAIN_LEN.iter().map(l).collect::<Vec<_>>(),
++    );
++    eprintln!("AOT eager ok={} err={}", l(&EAGER_OK), l(&EAGER_ERR));
++    if let Some(p) = std::env::var_os("IETS_AOT_ERR_TO")
++        && let Some(e) = ERR_SITES.lock().unwrap().as_ref()
++    {
++        let out: String = e.iter().map(|(a, b)| format!("{a} {b}\n")).collect();
++        let _ = std::fs::write(p, out);
++    }
++    let g = SITES.lock().unwrap();
++    let Some(m) = g.as_ref() else { return };
++    let (mut tc, mut tf, mut always_c, mut always_s, mut never_c, mut ge99_c) = (0, 0, 0, 0, 0, 0);
++    let (mut ec, mut ea) = (0u64, 0u64);
++    let mut by_tag: HashMap<u8, (u64, u64, u64)> = HashMap::new();
++    for s in m.values() {
++        tc += s.created;
++        tf += s.forced;
++        let e = by_tag.entry(s.tag).or_default();
++        e.0 += s.created;
++        e.1 += s.forced;
++        if s.forced == s.created {
++            always_c += s.created;
++            always_s += 1;
++            e.2 += s.created;
++        }
++        if s.elig {
++            ec += s.created;
++            if s.forced == s.created {
++                ea += s.created;
++            }
++        }
++        if s.forced == 0 {
++            never_c += s.created;
++        }
++        if s.forced * 100 >= s.created * 99 {
++            ge99_c += s.created;
++        }
++    }
++    eprintln!(
++        "AOT thunks sites={} created={} forced={} always_forced_thunks={} always_forced_sites={} never_forced_thunks={} ge99_thunks={}",
++        m.len(), tc, tf, always_c, always_s, never_c, ge99_c
++    );
++    eprintln!("AOT eligible created={ec} always_forced={ea}");
++    let mut tags: Vec<_> = by_tag.into_iter().collect();
++    tags.sort_by_key(|t| std::cmp::Reverse(t.1.0));
++    for (t, (c, f, a)) in tags {
++        eprintln!("AOT tag {t} created={c} forced={f} always={a}");
++    }
++    if let Some(p) = std::env::var_os("IETS_AOT_SITES_TO") {
++        let mut out = String::new();
++        for s in m.values() {
++            if s.elig && s.created > 0 && s.forced == s.created {
++                out.push_str(&format!("{} {}\n", s.pos, s.tag));
++            }
++        }
++        let _ = std::fs::write(p, out);
++    }
++}
++
++thread_local! {
++    pub static MEMO: std::cell::RefCell<HashMap<usize, bool>> = std::cell::RefCell::new(HashMap::new());
++}
++
++pub fn path_hash(p: &[u8]) -> u64 {
++    use std::hash::{Hash, Hasher};
++    let mut h = std::collections::hash_map::DefaultHasher::new();
++    p.hash(&mut h);
++    h.finish() & 0xffff_ffff
++}
++
++pub static ERR_SITES: Mutex<Option<std::collections::HashSet<(u64, u8)>>> = Mutex::new(None);
++
++pub fn err_site(k: (u64, u8)) {
++    ERR_SITES.lock().unwrap().get_or_insert_with(Default::default).insert(k);
++}
+diff --git i/src/eval/mod.rs w/src/eval/mod.rs
+index 75c2c995..95100848 100644
+--- i/src/eval/mod.rs
++++ w/src/eval/mod.rs
+@@ -1057,6 +1057,9 @@ impl Evaluator {
+             return Ok(w.thunk_value(st));
+         }
+         state.set(Word::BLACKHOLE);
++        if crate::aotstats::on() && w.thunk_kind() == Kind::Thunk {
++            crate::aotstats::forced(w.as_thunk().ir() as *const Ir as usize);
++        }
+         #[cfg(feature = "stats2")]
+         {
+             self.arena.stats.census.forced[match w.thunk_kind() {
+@@ -1117,6 +1120,52 @@ impl Evaluator {
+ 
+     /// Wrap `ir` for lazy evaluation in `env`, sharing existing values and
+     /// thunks for cheap expressions.
++    /// `maybe_thunk` at a site whose env is complete: an argument, a list
++    /// element or a plain attribute. A site in `IETS_AOT_EAGER` is evaluated
++    /// now, and a failure falls back to the thunk.
++    #[inline]
++    pub fn maybe_thunk_e(&mut self, env: &'static EnvObj, ir: IrRef) -> Word {
++        if let Some(set) = crate::aotstats::eager()
++            && !matches!(ir, Ir::Const(_) | Ir::Local { .. } | Ir::Lambda(_))
++            && crate::aotstats::MEMO.with(|m| {
++                let k = ir as *const Ir as usize;
++                if let Some(&b) = m.borrow().get(&k) {
++                    return b;
++                }
++                let b = set.contains(&(self.site_key(ir), ir_tag(ir)));
++                m.borrow_mut().insert(k, b);
++                b
++            })
++        {
++            match self.eval(env, ir) {
++                Ok(v) => {
++                    crate::aotstats::EAGER_OK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++                    return v;
++                }
++                Err(_) => {
++                    crate::aotstats::EAGER_ERR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++                    if crate::aotstats::on() {
++                        crate::aotstats::err_site((self.site_key(ir), ir_tag(ir)));
++                    }
++                }
++            }
++        }
++        if crate::aotstats::on() {
++            crate::aotstats::ELIG.with(|e| e.set(true));
++            let w = self.maybe_thunk(env, ir);
++            crate::aotstats::ELIG.with(|e| e.set(false));
++            return w;
++        }
++        self.maybe_thunk(env, ir)
++    }
++
++    fn site_key(&self, ir: IrRef) -> u64 {
++        match self.file_of(ir_pos(ir)) {
++            Some((f, off)) => (crate::aotstats::path_hash(&f.path) << 32) | u64::from(off),
++            None => u64::MAX,
++        }
++    }
++
+     #[inline]
+     pub fn maybe_thunk(&mut self, env: &'static EnvObj, ir: IrRef) -> Word {
+         match ir {
+@@ -1183,6 +1232,9 @@ impl Evaluator {
+ 
+     #[inline]
+     fn mk_thunk_counted(&mut self, env: &'static EnvObj, ir: IrRef) -> Word {
++        if crate::aotstats::on() {
++            crate::aotstats::created(ir as *const Ir as usize, ir_tag(ir), self.site_key(ir));
++        }
+         self.nr_thunks += 1;
+         self.arena.mk_thunk(env, ir)
+     }
+@@ -1770,7 +1822,7 @@ impl Evaluator {
+             Ir::List(items) => {
+                 let l = self.arena.alloc_list_as(items.len(), Stat::ListLit);
+                 for (c, item) in l.cells().iter().zip(items.iter()) {
+-                    let w = self.maybe_thunk(env, item);
++                    let w = self.maybe_thunk_e(env, item);
+                     c.set(w);
+                 }
+                 Ok(Word::from_ref(l))
+@@ -1781,11 +1833,11 @@ impl Evaluator {
+                 let mut buf: [Word; 8] = [Word::EMPTY; 8];
+                 if args.len() <= 8 {
+                     for (i, a) in args.iter().enumerate() {
+-                        buf[i] = self.maybe_thunk(env, a);
++                        buf[i] = self.maybe_thunk_e(env, a);
+                     }
+                     self.apply(f, &buf[..args.len()], *pos)
+                 } else {
+-                    let v: Vec<Word> = args.iter().map(|a| self.maybe_thunk(env, a)).collect();
++                    let v: Vec<Word> = args.iter().map(|a| self.maybe_thunk_e(env, a)).collect();
+                     self.apply(f, &v, *pos)
+                 }
+             }
+@@ -1970,7 +2022,13 @@ impl Evaluator {
+     ) -> EvalResult<Word> {
+         let mut e = env;
+         let mut walked = 0u32;
+-        for &d in withs {
++        let census = crate::aotstats::on();
++        if census {
++            use std::sync::atomic::Ordering::Relaxed;
++            crate::aotstats::WITH_EVALS.fetch_add(1, Relaxed);
++            crate::aotstats::WITH_CHAIN_LEN[withs.len().min(4)].fetch_add(1, Relaxed);
++        }
++        for (k, &d) in withs.iter().enumerate() {
+             for _ in walked..d {
+                 e = e.up().expect("compile-time depth is valid");
+             }
+@@ -1983,8 +2041,18 @@ impl Evaluator {
+             )?;
+             e.slot(0).set(Word::from_ref(attrs));
+             if let Some(a) = attrs.get(sym) {
++                if census {
++                    crate::aotstats::WITH_HIT_AT[k.min(4)]
++                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++                }
+                 return self.force_cell(&a.cell);
+             }
++            if census {
++                crate::aotstats::WITH_MISS_PROBES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
++            }
++        }
++        if census {
++            crate::aotstats::WITH_GLOBAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+         }
+         if let Some(w) = self.globals.table.get(&sym) {
+             return Ok(*w);
+@@ -2228,7 +2296,7 @@ impl Evaluator {
+             for b in a.binds.iter() {
+                 let w = match b.scope {
+                     BindScope::From => self.maybe_thunk(inherit_env.unwrap(), b.value),
+-                    _ => self.maybe_thunk(env, b.value),
++                    _ => self.maybe_thunk_e(env, b.value),
+                 };
+                 entries.push((b.sym, b.pos, w));
+             }
+@@ -2277,7 +2345,7 @@ impl Evaluator {
+             for (i, b) in a.binds.iter().enumerate() {
+                 let w = match b.scope {
+                     BindScope::From => self.maybe_thunk(inherit_env.unwrap(), b.value),
+-                    _ => self.maybe_thunk(env, b.value),
++                    _ => self.maybe_thunk_e(env, b.value),
+                 };
+                 out.init(i, b.sym, b.pos, w);
+             }
+@@ -2619,6 +2687,24 @@ impl ArithOp {
+ }
+ 
+ /// Best-effort position of an IR node, for error messages.
++pub fn ir_tag(ir: &Ir) -> u8 {
++    match ir {
++        Ir::Apply { .. } => 1,
++        Ir::Select(_) | Ir::Select1 { .. } | Ir::SelectCount(_) => 2,
++        Ir::Attrs(_) => 3,
++        Ir::List(_) => 4,
++        Ir::Let(_) => 5,
++        Ir::If { .. } => 6,
++        Ir::Concat { .. } => 7,
++        Ir::With { .. } => 8,
++        Ir::Update(..) => 9,
++        Ir::WithVar { .. } => 10,
++        Ir::ConcatLists(..) => 11,
++        Ir::Local { .. } => 12,
++        _ => 0,
++    }
++}
++
+ pub fn ir_pos(ir: &Ir) -> Pos {
+     match ir {
+         Ir::WithVar { pos, .. }
+diff --git i/src/lib.rs w/src/lib.rs
+index 210498d3..ea526eab 100644
+--- i/src/lib.rs
++++ w/src/lib.rs
+@@ -7,6 +7,7 @@ macro_rules! errln {
+     };
+ }
+ 
++pub mod aotstats;
+ pub mod api;
+ pub mod argv;
+ pub mod build;

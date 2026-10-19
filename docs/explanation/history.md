@@ -6,6 +6,17 @@ what we measured and why it came out again, newest first, so nobody has to
 try the same idea a third time. The code and the full tables are in git. The
 numbers behind a *current* default live on that feature's page.
 
+## No precompiled nixpkgs IR
+
+*2026-10-19*
+
+Shipping nixpkgs with its IR already compiled, and spending an unlimited
+offline budget on whole-program analysis, was measured and not built. The
+warm IR cache leaves at most the load, 13 % of a NixOS configuration, and
+resolving `with` or evaluating always-forced thunks directly gave under
+0.1 % and at most 2 %. [What precompiled nixpkgs IR would buy](precompiled-ir.md)
+has the numbers.
+
 ## No machine-wide settings file
 
 *2026-09-27*
