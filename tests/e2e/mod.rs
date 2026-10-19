@@ -3,6 +3,7 @@
 
 #![allow(dead_code)]
 
+use std::fmt::Display;
 use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -29,7 +30,7 @@ pub struct Store {
     nonce: String,
 }
 
-fn which(prog: &str) -> Option<PathBuf> {
+pub fn which(prog: &str) -> Option<PathBuf> {
     let path = env::var_os("PATH")?;
     env::split_paths(&path)
         .map(|d| d.join(prog))
@@ -129,6 +130,13 @@ impl Store {
         self.write("pkgs/env.nix", &env.replace("@PATH@", path));
     }
 
+    /// An empty dir for PATH and IETS_NIX_BIN_DIR: no nix to fall back on.
+    pub fn no_nix(&self) -> PathBuf {
+        let d = self.dir().join("nobin");
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
     /// Writes `template` to `name` in the store's dir, with `@SYSTEM@`,
     /// `@SHELL@` (an absolute bash) and `@NONCE@` filled in.
     pub fn write(&self, name: &str, template: &str) -> PathBuf {
@@ -222,6 +230,33 @@ pub fn stderr(o: &Output) -> String {
     String::from_utf8_lossy(&o.stderr).into_owned()
 }
 
+/// The `--log-format internal-json` records in `stderr`.
+pub fn records(stderr: &str) -> Vec<serde_json::Value> {
+    stderr
+        .lines()
+        .filter_map(|l| l.strip_prefix("@nix "))
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
+}
+
+/// git in `repo`, with no config of the machine's.
+pub fn git(repo: &Path, args: &[&str]) -> Output {
+    let mut c = Command::new("git");
+    c.args(["-c", "user.name=iets", "-c", "user.email=iets@example.com"])
+        .args([
+            "-c",
+            "init.defaultBranch=main",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1");
+    ok(&mut c)
+}
+
 /// The sorted names in `dir`, none if it is missing.
 pub fn ls(dir: &Path) -> Vec<String> {
     let mut v: Vec<String> = fs::read_dir(dir)
@@ -232,6 +267,31 @@ pub fn ls(dir: &Path) -> Vec<String> {
         .unwrap_or_default();
     v.sort();
     v
+}
+
+/// Collects failed verdicts, so one run reports every failing case.
+#[derive(Default)]
+pub struct Checks(Vec<String>);
+
+impl Checks {
+    pub fn check(&mut self, label: &str, ok: bool, detail: impl Display) -> bool {
+        if !ok {
+            self.0.push(format!("{label}: {detail}"));
+        }
+        ok
+    }
+
+    pub fn fail(&mut self, what: String) {
+        self.0.push(what);
+    }
+}
+
+impl Drop for Checks {
+    fn drop(&mut self) {
+        if !thread::panicking() && !self.0.is_empty() {
+            panic!("{} failed:\n{}", self.0.len(), self.0.join("\n\n"));
+        }
+    }
 }
 
 /// The stdout of `o` as JSON.

@@ -556,7 +556,7 @@ Nix gives one: a clean tree with its full history. It differs in these ways:
 Observe it: in a git repository, evaluate `toString self.revCount` from a
 flake with `iets eval` and with `nix eval`. stdout is the same, and only
 iets prints the `rev-count` warning. `--lint rev-count=off` removes it.
-`scripts/flaketest.nu` compares the value with Nix on a clean tree, a dirty
+`tests/e2e_flake.rs` compares the value with Nix on a clean tree, a dirty
 tree and a shallow clone.
 
 ## Pure evaluation of a project with no flake
