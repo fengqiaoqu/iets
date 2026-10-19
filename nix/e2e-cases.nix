@@ -20,7 +20,6 @@ let
   '';
 in
 {
-  cachetest = { };
   classic-e2e = { setup = "${leftovers}"; };
   daemon-e2e = { packages = [ pkgs.jq ]; };
   evaljobs-flags = {
