@@ -1,4 +1,4 @@
-{ lib, stdenv, runCommand, nushell, ast-grep, craneLib, commonArgs, sources, iets, ietsStatic, ietsRiscv64, fuzz, e2eTest, e2eCases }:
+{ lib, stdenv, runCommand, nix, nushell, ast-grep, craneLib, commonArgs, sources, iets, ietsStatic, ietsRiscv64, fuzz, e2eTest, e2eCases }:
 let
   # the dev profile, as `cargo test` in the dev shell: the release profile is
   # fat LTO, minutes for no extra coverage
@@ -20,7 +20,13 @@ in
 {
   # the tests that need a live /nix/store are #[ignore]d; run them
   # with `cargo test -- --ignored` in the dev shell.
-  test = craneLib.cargoNextest withDev;
+  test = craneLib.cargoNextest (withDev // {
+    # nix runs the private daemon of tests/e2e
+    nativeCheckInputs = [ nix ];
+    # cargo would create /homeless-shelter, and then that daemon refuses to
+    # build without a sandbox
+    postUnpack = "export HOME=$(mktemp -d)";
+  });
   # nextest runs no doctests
   doctest = craneLib.cargoDocTest withDev;
   doc = craneLib.cargoDoc (withDev // { RUSTDOCFLAGS = "-D warnings"; });
