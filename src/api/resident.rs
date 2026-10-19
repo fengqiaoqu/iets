@@ -286,3 +286,56 @@ impl Resident {
         })
     }
 }
+
+impl Resident {
+    /// One line of a REPL over the root: `line` is an expression evaluated
+    /// with `scope` in scope, each name bound to an attribute of the root
+    /// (`""` for the root itself). The value is printed as `nix repl` prints
+    /// it: one level forced, or all of it when `strict`, as `:p` asks.
+    pub fn repl(
+        &self,
+        line: &str,
+        scope: Vec<(String, String)>,
+        strict: bool,
+    ) -> Result<String, String> {
+        use crate::api::value::{Eval, Value};
+        let line = line.to_owned();
+        self.ask(move |ev, root| {
+            let mut bound = Vec::new();
+            for (name, attr) in &scope {
+                bound.push((name.clone(), root.select(ev, attr)?));
+            }
+            let r = (|| {
+                let src = format!("__iets_repl_scope: with __iets_repl_scope; ({line}\n)");
+                let f = ev.eval_string(&src, &api::cwd())?;
+                let scope = {
+                    let mut e = Eval::new(ev);
+                    let entries: Vec<(&[u8], Value<'_>)> = bound
+                        .iter()
+                        .map(|(n, w)| (n.as_bytes(), Value::of(*w)))
+                        .collect();
+                    e.attrs(&entries)?.word()
+                };
+                let v = ev.apply(f, &[scope], Pos::NONE)?;
+                let v = if strict {
+                    ev.force_deep(v)?
+                } else {
+                    let v = ev.force(v)?;
+                    if let Some(a) = v.as_attrs() {
+                        for attr in a.iter() {
+                            let _ = ev.force(attr.cell.get());
+                        }
+                    }
+                    v
+                };
+                let mut out = Vec::new();
+                crate::print::print_ambiguous(ev, v, 0, &mut out, &mut Default::default(), 0)?;
+                Ok(String::from_utf8_lossy(&out).into_owned())
+            })();
+            r.map_err(|e: Box<crate::eval::Error>| {
+                api::report(ev, &e);
+                e.msg.clone()
+            })
+        })
+    }
+}
