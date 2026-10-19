@@ -3,7 +3,6 @@
 # runs them with an instrumented iets.
 { pkgs }:
 let
-  nix-grpc-daemon = import ./nix-grpc-store.nix { inherit pkgs; };
   # What an interrupted copy leaves: files at the store paths classic-e2e's
   # fetchurl and fetchTarball cases name, which the store never registered.
   leftovers = pkgs.writeShellScript "leftovers" ''
@@ -21,8 +20,4 @@ let
 in
 {
   classic-e2e = { setup = "${leftovers}"; };
-  grpc-e2e = {
-    packages = [ nix-grpc-daemon ];
-    env = "DAEMON=${nix-grpc-daemon}";
-  };
 }

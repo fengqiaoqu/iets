@@ -1,4 +1,4 @@
-{ lib, stdenv, runCommand, git, nix, util-linux, nix-eval-jobs, path, nushell, ast-grep, craneLib, commonArgs, sources, iets, ietsStatic, ietsRiscv64, fuzz, e2eTest, e2eCases }:
+{ lib, pkgs, stdenv, runCommand, git, nix, util-linux, nix-eval-jobs, path, nushell, ast-grep, craneLib, commonArgs, sources, iets, ietsStatic, ietsRiscv64, fuzz, e2eTest, e2eCases }:
 let
   # the dev profile, as `cargo test` in the dev shell: the release profile is
   # fat LTO, minutes for no extra coverage
@@ -23,11 +23,13 @@ in
   test = craneLib.cargoNextest (withDev // {
     # nix runs the private daemon of tests/e2e
     nativeCheckInputs = [ git nix ] ++ lib.optional stdenv.hostPlatform.isLinux util-linux;
-    IETS_TEST_NIXPKGS = "${path}";
-    IETS_TEST_NIX_EVAL_JOBS = lib.getExe nix-eval-jobs;
     # cargo would create /homeless-shelter, and then that daemon refuses to
     # build without a sandbox
     postUnpack = "export HOME=$(mktemp -d)";
+    IETS_TEST_NIXPKGS = "${path}";
+    IETS_TEST_NIX_EVAL_JOBS = lib.getExe nix-eval-jobs;
+  } // lib.optionalAttrs stdenv.hostPlatform.isLinux {
+    IETS_TEST_NIX_GRPC_DAEMON = "${import ./nix-grpc-store.nix { inherit pkgs; }}/bin/nix-grpc-daemon";
   });
   # every nixpkgs drv against nix-eval-jobs (tests/nixpkgs_eval.rs), with a
   # release build to keep it short

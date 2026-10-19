@@ -100,7 +100,7 @@ After an upload, `tests/e2e_daemon.rs` checks that:
 
 ## The `grpc://` transport
 
-The figures come from `scripts/grpc-e2e.nu` on a release build.
+The figures are from runs on the hello closure, with a release build.
 
 `nix-grpc-daemon` runs in plaintext standalone mode, scheduling onto itself,
 in front of a scratch chroot store. These are the transport's own figures,

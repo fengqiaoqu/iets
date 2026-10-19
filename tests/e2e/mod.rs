@@ -3,6 +3,7 @@
 
 #![allow(dead_code)]
 
+use std::ffi::OsStr;
 use std::fmt::Display;
 use std::io::Write;
 use std::os::unix::process::CommandExt;
@@ -182,7 +183,12 @@ impl Store {
 
     /// iets, talking to this daemon only.
     pub fn iets(&self) -> Command {
-        let mut c = hermetic::iets();
+        self.iets_as(env!("CARGO_BIN_EXE_iets"))
+    }
+
+    /// iets started as `prog`, a link to it under another name.
+    pub fn iets_as(&self, prog: impl AsRef<OsStr>) -> Command {
+        let mut c = hermetic::iets_as(prog);
         Store::env(self.dir(), &mut c);
         c.current_dir(self.dir());
         c
