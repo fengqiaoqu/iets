@@ -12,6 +12,8 @@ let
 in
 mkDerivation {
   name = "shell";
+  # get-env.sh writes to each of these, as stdenv sets it
+  outputs = [ "out" ];
   inherit stdenv;
   builder = builtins.toFile "builder.sh" ''
     source $stdenv/setup

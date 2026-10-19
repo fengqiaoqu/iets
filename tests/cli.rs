@@ -302,3 +302,74 @@ fn current_system_is_the_hosts() {
     let o = iets(&["eval", "--impure", "--expr", "builtins.currentSystem"]);
     assert_eq!(text(&o.stdout), want, "{}", text(&o.stderr));
 }
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_full_stdout_is_an_error() {
+    let d = tempdir().unwrap();
+    let multi = d.path().join("multi.nix");
+    fs::write(&multi, "{ }").unwrap();
+    for a in [
+        &["version"][..],
+        &["parse", multi.to_str().unwrap()],
+        &["--help"],
+        &["lint", "list"],
+    ] {
+        let full = fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/full")
+            .unwrap();
+        let st = hermetic::iets().args(a).stdout(full).status().unwrap();
+        assert_eq!(st.code(), Some(1), "{a:?}");
+    }
+}
+
+#[test]
+fn a_bad_config_stops_only_what_reads_a_setting() {
+    let conf = tempdir().unwrap();
+    fs::create_dir_all(conf.path().join("iets")).unwrap();
+    fs::write(conf.path().join("iets/iets.toml"), "bogus = 1\n").unwrap();
+    let run = |a: &[&str]| {
+        hermetic::iets()
+            .env("XDG_CONFIG_HOME", conf.path())
+            .args(a)
+            .output()
+            .unwrap()
+    };
+    for (a, want) in [
+        (&["version"][..], 0),
+        (&["--help"], 0),
+        (&["eval", "-E", "1"], 1),
+    ] {
+        let o = run(a);
+        assert_eq!(o.status.code(), Some(want), "{a:?}: {}", text(&o.stderr));
+    }
+    // the log format is read first, so an early error is a record
+    let o = run(&["eval", "--log-format", "internal-json", "-E", "1"]);
+    assert!(text(&o.stderr).starts_with("@nix "), "{}", text(&o.stderr));
+}
+
+#[test]
+fn eval_says_what_it_does_not_support() {
+    let o = iets(&["eval", "--expr", "builtins.fetchMercurial ./."]);
+    assert_eq!(o.status.code(), Some(1));
+    assert!(
+        text(&o.stderr).contains(r#"builtins.fetchTree { type = "hg";"#),
+        "{}",
+        text(&o.stderr)
+    );
+    for (r, want) in [
+        (
+            "nixpkgs#lib.version",
+            "flake registry references (nixpkgs#…) are not supported",
+        ),
+        (
+            "github:NixOS/nixpkgs#lib.version",
+            "only local paths are supported",
+        ),
+    ] {
+        let o = iets(&["eval", r]);
+        assert_eq!(o.status.code(), Some(1), "{r}");
+        assert!(text(&o.stderr).contains(want), "{r}: {}", text(&o.stderr));
+    }
+}

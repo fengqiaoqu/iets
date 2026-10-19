@@ -1,4 +1,4 @@
-{ lib, stdenv, iets, ietsStatic, classic, fuzz, coverage }:
+{ iets, ietsStatic, classic, fuzz }:
 {
   default = iets;
   inherit classic;
@@ -12,8 +12,4 @@
   fuzz-eval-campaign = fuzz.campaign { target = "eval"; };
   fuzz-drv-campaign = fuzz.campaign { target = "drv-gen"; };
   fuzz-drv-eval-campaign = fuzz.campaign { target = "drv-eval"; };
-}
-// lib.optionalAttrs (stdenv.hostPlatform.system == "x86_64-linux") {
-  # line coverage of the e2e tests in NixOS containers (nix/coverage.nix)
-  coverage-e2e = coverage;
 }

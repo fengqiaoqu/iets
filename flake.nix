@@ -31,9 +31,6 @@
               RUST_SRC_PATH = "${rustPlatform.rustLibSrc}";
             })
           { };
-        e2eCases = import ./nix/e2e-cases.nix { inherit pkgs; };
-        e2eTest = final.callPackage ./nix/e2e-test.nix { };
-        coverage = final.callPackage ./nix/coverage.nix { };
         # the differential fuzzer against Nix (docs/how-to/fuzz.md)
         fuzz = final.callPackage ./nix/fuzz.nix { };
         # for files that return a set of packages

@@ -83,7 +83,7 @@ the same way. `iets eval-jobs` uploads in batches while the walk runs.
 | out-links | the local daemon, the closure copied back first | the local daemon substitutes from its caches; the rest by `FetchNars` |
 
 The stdout of the classic names is byte for byte the real nix's
-(`scripts/classic-e2e.nu`).
+(`tests/classic_*.rs`).
 
 ## The worker protocol
 

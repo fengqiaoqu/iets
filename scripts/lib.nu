@@ -19,12 +19,6 @@ export def diff-head [a: string, b: string, n: int]: nothing -> list<string> {
   $d
 }
 
-# Exit code of CMD as bash reports it: 128+N when signal N killed it.
-export def --wrapped exit-code [...cmd: string]: nothing -> int {
-  let r = (try { ^($cmd | first) ...($cmd | skip 1) | complete } catch {|e| {exit_code: ($e.exit_code? | default 128)} })
-  if $r.exit_code < 0 { 128 - $r.exit_code } else { $r.exit_code }
-}
-
 # $NAME split on spaces, so NIX="nix eval" style values keep working.
 export def env-cmd [name: string, default: string]: nothing -> list<string> {
   $env | get -o $name | default $default | split row " " | where $it != ""
@@ -34,12 +28,6 @@ export def env-cmd [name: string, default: string]: nothing -> list<string> {
 export def glob-sorted [pat: string]: nothing -> list<string> {
   let names = (ls ($pat | into glob) | get name | str join "\n" | ^sort | lines)
   $names
-}
-
-# Print "ok   NAME" or "FAIL DETAIL"; returns OK.
-export def verdict [ok: bool, name: string, detail: string]: nothing -> bool {
-  if $ok { print $"ok   ($name)" } else { print $"FAIL ($detail)" }
-  $ok
 }
 
 # The repository root, whatever directory a script runs from.
@@ -106,24 +94,6 @@ export def fail [msg: string] {
   error make -u {msg: "fail"}
 }
 
-# stdout of CMD; a non-zero exit is an error.
-export def --wrapped out-of [...cmd: string]: nothing -> string {
-  let r = (^($cmd | first) ...($cmd | skip 1) | complete)
-  if $r.exit_code != 0 { error make -u {msg: $"($cmd | str join ' ') failed \(exit ($r.exit_code)\)"} }
-  $r.stdout
-}
-
-export def --wrapped quiet-ok [...cmd: string]: nothing -> bool {
-  (^($cmd | first) ...($cmd | skip 1) | complete | get exit_code) == 0
-}
-
-# `grep -E RE FILE` under set -e: prints the matches, fails when there are none.
-export def show-matching [re: string, file: string] {
-  let l = (open --raw $file | lines | where $it =~ $re)
-  if ($l | is-empty) { error make -u {msg: $"no ($re) lines in ($file)"} }
-  $l | show
-}
-
 # `open --raw` is a byte stream; == against a string is always false, so compare bytes.
 export def bytes-of [f: string]: nothing -> binary { open --raw $f | into binary }
 export def same-file [a: string, b: string]: nothing -> bool { (bytes-of $a) == (bytes-of $b) }
@@ -173,95 +143,4 @@ def warn-nix-version [cmd: string] {
   if $v != null and $v != $REF_NIX {
     print -e $"warning: comparing against nix ($v), not ($REF_NIX); some diffs may be version drift"
   }
-}
-
-# False under E2E_OFFLINE=1, which the flake check's container sets: it has no
-# network. The cases that fetch go through this, so a skip is printed, not silent.
-export def online [what: string]: nothing -> bool {
-  if ($env.E2E_OFFLINE? | default "") != "1" { return true }
-  print $"skip ($what): no network"
-  false
-}
-
-# The directory of the real nix-instantiate on PATH.
-export def real-bin-dir []: nothing -> string {
-  require-real-nix nix-instantiate
-  let real = (resolved-cmd nix-instantiate)
-  if ($real | is-empty) { error make -u {msg: "no nix-instantiate on PATH; run inside `nix develop -c ...`"} }
-  $real | path dirname
-}
-
-# The classic farm in DIR: BIN under Nix's command names, and the real nix it
-# falls back to, as `nix build .#classic` lays it out. Returns DIR/bin.
-export def make-farm [bin: string, dir: string]: nothing -> string {
-  mkdir $"($dir)/bin"
-  for n in [nix-instantiate nix-build nix-eval-jobs nix-shell nix] {
-    ^ln -sf $bin $"($dir)/bin/($n)"
-  }
-  mkdir $"($dir)/share/iets"
-  (real-bin-dir) | save -f $"($dir)/share/iets/real-nix-bin"
-  $"($dir)/bin"
-}
-
-# scratch-daemon ROOT [OPTIONS]: starts `nix-daemon --store local?root=ROOT` as a job and
-# returns its socket path once it listens. `NIX_DAEMON_SOCKET_PATH` pins the socket under
-# ROOT; Nix 2.34's daemon binds the system socket otherwise.
-export def --wrapped scratch-daemon [root: string, ...options: string]: nothing -> string {
-  let sock = $"($root)/nix/var/nix/daemon-socket/socket"
-  let log = $"($root).log"
-  let store = $"local?root=($root)"
-  job spawn { with-env {NIX_DAEMON_SOCKET_PATH: $sock} { ^nix-daemon --store $store ...$options o+e> $log } } | ignore
-  for _ in 1..200 {
-    if ($sock | path exists) { break }
-    sleep 50ms
-  }
-  if not ($sock | path exists) {
-    print -e (open --raw $log | chomp)
-    error make -u {msg: $"scratch daemon did not start in ($root)"}
-  }
-  $sock
-}
-
-# The shared build-test flake: four checks and a packages set, no nixpkgs. Every builder
-# carries a nonce so each run builds fresh derivations instead of finding the
-# previous run's outputs already in the store.
-export def checks-flake [dir: string] {
-  mkdir $dir
-  let nonce = $"(random int 0..999999)-(date now | into int)"
-  r#'{
-  outputs = { self }:
-    let
-      systems = [ "x86_64-linux" "aarch64-linux" ];
-      forAll = f: builtins.listToAttrs (map (s: { name = s; value = f s; }) systems);
-      drv = system: name: args: derivation ({
-        inherit name system;
-        builder = "/bin/sh";
-      } // args);
-      nonce = "@NONCE@";
-    in {
-      checks = forAll (system: rec {
-        ok = drv system "fb-ok" {
-          args = [ "-c" "echo building fb-ok ${nonce}; echo done > $out" ];
-        };
-        dep = drv system "fb-dep" {
-          args = [ "-c" "echo building fb-dep ${nonce}; echo dep > $out" ];
-        };
-        chain = drv system "fb-chain" {
-          args = [ "-c" "echo building fb-chain ${nonce}; while read -r l; do echo \"$l\"; done < ${dep} > $out" ];
-        };
-        bad = drv system "fb-bad" {
-          args = [ "-c" "echo about to fail ${nonce}; echo line2; exit 1" ];
-        };
-      });
-      packages = forAll (system: {
-        lone = drv system "fb-lone" {
-          args = [ "-c" "echo building fb-lone ${nonce}; echo lone > $out" ];
-        };
-      });
-    };
-}
-'# | str replace -a "@NONCE@" $nonce | save -f $"($dir)/flake.nix"
-  # `nix flake lock` writes nothing for a flake with no inputs, and iets
-  # only evaluates locked flakes, so the empty lock is written here.
-  '{"nodes":{"root":{}},"root":"root","version":7}' | save -f $"($dir)/flake.lock"
 }

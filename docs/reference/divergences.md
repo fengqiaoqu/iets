@@ -626,8 +626,8 @@ cache (`docs/explanation/caching.md`, `docs/reference/classic.md`). Nix's
 own evaluation cache for flakes is keyed on the locked fingerprint and is
 off for a dirty tree, `-f` and `--expr`; iets's is keyed on the command and
 validated by what the run read. stdout and the exit code of a hit are those
-of the run that wrote the entry, which `scripts/classic-e2e.nu` compares
-with Nix 2.34.8.
+of the run that wrote the entry, which `tests/classic_cache.rs`
+compares with Nix 2.34.8.
 
 On stderr:
 
@@ -733,7 +733,7 @@ warning that says so. Put the settings in `nix.conf` to get them.
 
 Observe it: `nix eval --accept-flake-config .#x` on a flake with
 `nixConfig.extra-substituters`. stdout and the exit code are Nix's, and
-stderr has the `ignored-flag` warning. `scripts/classic-e2e.nu` has the
+stderr has the `ignored-flag` warning. `tests/classic_eval.rs` has the
 case.
 
 ## GC roots the shells and the builds keep
@@ -755,7 +755,7 @@ cost is disk: the build pins its output until the TTL sweeps the link.
 Observe it: `nix-build --no-out-link -E '<drv>'` prints the same path and
 the same exit code as Nix, with no symlink on either side. Then
 `nix-store --query --roots <path>` names a link under `~/.cache/iets/roots`
-for iets's run and nothing for Nix's. `scripts/classic-e2e.nu` compares
+for iets's run and nothing for Nix's. `tests/classic_build.rs` compares
 both runs byte for byte and checks the root in the same case.
 
 ## The outputs of `iets build --builder`

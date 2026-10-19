@@ -1,4 +1,4 @@
-{ lib, pkgs, stdenv, runCommand, git, nix, util-linux, nix-eval-jobs, path, nushell, ast-grep, craneLib, commonArgs, sources, iets, ietsStatic, ietsRiscv64, fuzz, e2eTest, e2eCases }:
+{ lib, pkgs, stdenv, runCommand, git, nix, util-linux, nix-eval-jobs, path, ast-grep, craneLib, commonArgs, sources, ietsStatic, ietsRiscv64, fuzz }:
 let
   # the dev profile, as `cargo test` in the dev shell: the release profile is
   # fat LTO, minutes for no extra coverage
@@ -7,19 +7,8 @@ let
     cargoArtifacts = craneLib.buildDepsOnly (dev // { cargoCheckExtraArgs = "--all-targets"; });
     doInstallCargoArtifacts = false;
   };
-  # scripts/<name>.nu against the built binary, in the build sandbox: the
-  # scripts that need no nix-daemon and no live /nix/store.
-  nuScript = name: runCommand "iets-${name}" { nativeBuildInputs = [ nushell ]; } ''
-    cp -r ${sources.scripts}/scripts ${sources.scripts}/tests .
-    chmod -R u+w scripts tests
-    export IETS=${iets}/bin/iets
-    nu scripts/${name}.nu
-    touch $out
-  '';
 in
 {
-  # the tests that need a live /nix/store are #[ignore]d; run them
-  # with `cargo test -- --ignored` in the dev shell.
   test = craneLib.cargoNextest (withDev // {
     # nix runs the private daemon of tests/e2e
     nativeCheckInputs = [ git nix ] ++ lib.optional stdenv.hostPlatform.isLinux util-linux;
@@ -71,7 +60,3 @@ in
 }
 # the differential fuzzers against Nix (nix/fuzz.nix)
 // fuzz.checks
-# The scripts that need a nix-daemon and a writable store, in a NixOS test
-# container (nix/e2e-test.nix). Their derivations name x86_64-linux.
-// lib.optionalAttrs (stdenv.hostPlatform.system == "x86_64-linux")
-  (lib.mapAttrs (name: args: e2eTest ({ inherit name iets; } // args)) e2eCases)
