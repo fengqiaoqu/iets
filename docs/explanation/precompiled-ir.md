@@ -53,6 +53,42 @@ interning 2.6 % and blake3 1.3 %. A precomputed symbol table and a
 pointer-free IR format would remove most of that. Both change how every
 IR node is read, and the prize is under the 13 % above.
 
+### Bundles
+
+A few large bundles instead of one entry per file would remove system
+calls. A warm nixos-server run at one worker makes these, counted with
+`perf trace -s`:
+
+| call | count | time under the tracer |
+|---|---|---|
+| `statx` | 34,627 | 69 ms |
+| `read` | 17,441 | 34 ms |
+| `openat` | 11,521 | 34 ms |
+| `close` | 11,513 | 18 ms |
+| `getdents64` | 2,225 | 10 ms |
+
+The tracer adds its own cost to each call. Without it, the whole run spends
+110 ms in the kernel, 12 % of the wall, so the file calls cost less than
+that. A bundle removes the 2,863 entry opens and the source reads for the
+key. Most of the rest are repeats: 21,365 `statx` calls on nixpkgs name
+only 4,220 paths, and 8,639 opens name 5,896. A store path never changes,
+so iets can remember its `stat` within one run, with no bundle.
+
+A bundle does not make the download smaller. The 20,909 files that outpaths
+chunk 0 loads are 87.6 MB of source and 63.1 MB of IR. Compressed, the IR
+is larger than the source:
+
+| | tar | zstd -19 | xz -9 |
+|---|---|---|---|
+| IR of the 20,909 files outpaths loads | 79 MB | 25.9 MB | 22.6 MB |
+| every `.nix` file of nixpkgs, 45,003 files | 151 MB | 20.9 MB | 20.2 MB |
+| all of nixpkgs | 255 MB | 38.8 MB | 36.4 MB |
+
+The IR also can't replace the source. Builders, patches and the `.nix`
+files that a derivation copies as a `src` still come from the tree, and an
+error message prints the source line. So IR is an addition to the download,
+about 26 MB on top of 39 MB.
+
 ## The analyses
 
 The rest of the prize has to come from analysis that a per-file compiler
@@ -169,3 +205,7 @@ One part is worth taking on its own. Replace the build id in the IR cache
 key with the format and semantics numbers above. Then a patch release
 keeps the warm cache, and users skip the 28 % first-run cost on nixos-server
 after each upgrade.
+
+A second part needs no shipping either. Remember the `stat` of a store path
+for the run. That removes most of the 21,365 `statx` calls a bundle would
+have removed.
