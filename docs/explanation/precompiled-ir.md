@@ -243,8 +243,32 @@ and the server drvPath are the same as the base.
 body can run in the same `eval` frame instead of a nested one. The
 prototype makes `eval` a loop for those four. It runs the same number of
 instructions, saves 1.8 % on server and 1.9 % on outpaths at one worker,
-and 1.5 % and 0.5 % at four. That is under the bar alone. It is a small
-change, so it is worth measuring again together with multi-argument calls.
+and 1.5 % and 0.5 % at four. That is under the bar alone.
+
+### Both, with the compile step
+
+The runs above use a warm IR cache. These runs compile every file: with
+`--no-ir-cache`, and "cold", which empties the cache before each run, so
+the run also writes it. Means of 15 runs (hello and server) and of 3
+(outpaths), change from the base:
+
+| workload | workers | mode | base | multi-argument | tail loop | both |
+|---|---|---|---|---|---|---|
+| hello | 1 | no IR cache | 63.4 ms | −5.8 % | −4.9 % | −3.9 % |
+| hello | 1 | cold | 74.7 ms | −1.2 % | −0.4 % | −1.5 % |
+| hello | 4 | no IR cache | 64.1 ms | −0.3 % | +0.3 % | −0.9 % |
+| hello | 4 | cold | 86.4 ms | +0.5 % | −0.2 % | +1.3 % |
+| nixos-server | 1 | no IR cache | 1,053 ms | −2.6 % | −2.5 % | −2.2 % |
+| nixos-server | 1 | cold | 1,235 ms | −1.5 % | −1.6 % | −1.5 % |
+| nixos-server | 4 | no IR cache | 575 ms | −1.1 % | −1.0 % | −1.0 % |
+| nixos-server | 4 | cold | 834 ms | −0.4 % | −0.6 % | −1.0 % |
+| outpaths 0/8 | 1 | no IR cache | 22.05 s | −4.6 % | −1.8 % | −3.6 % |
+| outpaths 0/8 | 4 | no IR cache | 8.34 s | −1.4 % | −0.9 % | −0.2 % |
+
+The noise on hello is 2–4 %, and on outpaths at four workers 2 %. No row
+is slower outside the noise. The two gains do not add: both together are
+no faster than multi-argument calls alone, and on outpaths they are
+slower. The 9,482 outpaths jobs are the same as the base for all three.
 
 ### Full laziness
 
@@ -328,7 +352,9 @@ keeps the warm cache, and users skip the 28 % first-run cost on nixos-server
 after each upgrade.
 
 Multi-argument calls are worth landing on their own: −2.1 % on server and
-−4.6 % on outpaths at one worker, in about 40 lines.
+−4.6 % on outpaths at one worker, in about 40 lines. With the compile step
+they still save 1.5–4.6 % at one worker and slow no workload. The tail
+loop adds nothing on top.
 
 A third part needs no shipping either. Remember the `stat` of a store path
 for the run. That removes most of the 21,365 `statx` calls a bundle would
