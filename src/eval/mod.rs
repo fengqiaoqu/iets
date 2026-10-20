@@ -44,7 +44,7 @@ use crate::store::source::{SourceOrigin, SrcPath};
 use crate::syntax::ast::{Ast, FileId};
 use crate::syntax::symbol::{FxHashMap, Interner, Sym};
 use crate::trace::{self, Trace, store};
-use crate::{argv, parallel, syntax};
+use crate::{argv, config, parallel, syntax};
 
 pub const MAX_CALL_DEPTH: u32 = 10000;
 
@@ -391,8 +391,6 @@ macro_rules! bail {
 use crate::sys;
 pub(crate) use bail;
 
-pub const DEFAULT_SYSTEM: &str = "x86_64-linux";
-
 /// Everything fixed before evaluation starts. A field set after `try_run` clones
 /// the evaluator is one fiber's alone, so there is no setter (docs/explanation/evaluation.md).
 ///
@@ -420,7 +418,7 @@ impl Default for EvalConfig {
     /// In the session this thread entered (docs/reference/library.md).
     fn default() -> EvalConfig {
         EvalConfig {
-            system: DEFAULT_SYSTEM,
+            system: config::DEFAULT_SYSTEM,
             pure: false,
             project_root: None,
             session: Session::current(),

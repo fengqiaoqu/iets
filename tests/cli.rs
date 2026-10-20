@@ -290,3 +290,15 @@ fn eval_json_forces_without_strict() {
     assert!(o.status.success(), "{}", text(&o.stderr));
     assert_eq!(text(&o.stdout).trim(), r#"{"a":[2]}"#);
 }
+
+/// Nix's currentSystem is the host's unless `system` says otherwise.
+#[test]
+fn current_system_is_the_hosts() {
+    let os = match env::consts::OS {
+        "macos" => "darwin",
+        other => other,
+    };
+    let want = format!("\"{}-{os}\"\n", env::consts::ARCH);
+    let o = iets(&["eval", "--impure", "--expr", "builtins.currentSystem"]);
+    assert_eq!(text(&o.stdout), want, "{}", text(&o.stderr));
+}
