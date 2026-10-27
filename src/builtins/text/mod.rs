@@ -59,14 +59,24 @@ pub(super) fn current_time(ev: &mut Evaluator, _args: &[Word], _pos: Pos) -> Eva
 /// no run state: a pattern compiles the same way in every session.
 type CompiledRegex = Result<regex::Prog, regex::Error>;
 
+#[derive(Default)]
+struct RegexCache {
+    map: FxHashMap<Vec<u8>, Rc<CompiledRegex>>,
+    /// What the programs hold, so many large patterns cannot pile up.
+    bytes: usize,
+}
+
+/// More than nixpkgs' patterns need many times over.
+const REGEX_CACHE_BYTES: usize = 64 << 20;
+
 thread_local! {
-    static REGEX_CACHE: RefCell<FxHashMap<Vec<u8>, Rc<CompiledRegex>>> = RefCell::new(FxHashMap::default());
+    static REGEX_CACHE: RefCell<RegexCache> = RefCell::new(RegexCache::default());
 }
 
 /// Entries in this thread's regex cache (`IETS_STATS`).
 #[inline(never)]
 pub fn regex_cache_len() -> usize {
-    REGEX_CACHE.with(|c| c.borrow().len())
+    REGEX_CACHE.with(|c| c.borrow().map.len())
 }
 
 fn invalid_regex(re: &[u8], e: regex::Error, pos: Pos) -> Box<Error> {
@@ -87,13 +97,33 @@ fn invalid_regex(re: &[u8], e: regex::Error, pos: Pos) -> Box<Error> {
 fn get_regex(re: &[u8]) -> Rc<CompiledRegex> {
     REGEX_CACHE.with(|c| {
         let mut c = c.borrow_mut();
-        if let Some(r) = c.get(re) {
+        if let Some(r) = c.map.get(re) {
             return r.clone();
         }
         let r = Rc::new(regex::compile(re));
-        c.insert(re.to_vec(), r.clone());
+        let size = re.len() + r.as_ref().as_ref().map_or(0, regex::Prog::size);
+        if size > REGEX_CACHE_BYTES {
+            return r;
+        }
+        if c.bytes + size > REGEX_CACHE_BYTES {
+            c.map.clear();
+            c.bytes = 0;
+        }
+        c.bytes += size;
+        c.map.insert(re.to_vec(), r.clone());
         r
     })
+}
+
+fn too_complex(re: &[u8], pos: Pos) -> Box<Error> {
+    Error::boxed(
+        ErrorKind::Eval,
+        format!(
+            "the regular expression '{}' backtracks too much on its input",
+            String::from_utf8_lossy(re)
+        ),
+        pos,
+    )
 }
 
 /// Refuses an invalid regex before the string is forced, as prim_match and
@@ -138,7 +168,8 @@ fn match_(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
         Ok(p) => p,
         Err(e) => return Err(invalid_regex(re, *e, pos)),
     };
-    let Some(groups) = regex::match_exact(prog, s.bytes) else {
+    let found = regex::match_exact(prog, s.bytes).map_err(|_| too_complex(re, pos))?;
+    let Some(groups) = found else {
         return Ok(Word::NULL);
     };
     Ok(Word::from_ref(group_list(ev, &groups, s.bytes)))
@@ -168,6 +199,7 @@ fn split(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
     let mut items: Vec<Word> = Vec::new();
     let mut prev_end = 0;
     for m in regex::matches(prog, hay) {
+        let m = m.map_err(|_| too_complex(re, pos))?;
         items.push(ev.arena.mk_string_static(&hay[prev_end..m.start], &[]));
         items.push(Word::from_ref(group_list(ev, &m.groups, hay)));
         prev_end = m.end;

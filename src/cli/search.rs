@@ -446,7 +446,7 @@ type Spans = Vec<(usize, usize)>;
 /// the description; an exclude regex that matches any of the three hides the
 /// package. The spans are what the text output highlights.
 fn matched(e: &Entry, res: &[Prog], exclude: &[Prog]) -> Option<(Spans, Spans)> {
-    let hit = |p: &Prog, s: &[u8]| regex::matches(p, s).next().is_some();
+    let hit = |p: &Prog, s: &[u8]| regex::matches(p, s).next().is_some_and(|m| m.is_ok());
     if exclude
         .iter()
         .any(|p| hit(p, &e.path) || hit(p, &e.pname) || hit(p, &e.desc))
@@ -456,8 +456,16 @@ fn matched(e: &Entry, res: &[Prog], exclude: &[Prog]) -> Option<(Spans, Spans)> 
     let (mut paths, mut descs) = (Vec::new(), Vec::new());
     for p in res {
         let before = (paths.len(), descs.len());
-        paths.extend(regex::matches(p, &e.path).map(|m| (m.start, m.end)));
-        descs.extend(regex::matches(p, &e.desc).map(|m| (m.start, m.end)));
+        paths.extend(
+            regex::matches(p, &e.path)
+                .map_while(Result::ok)
+                .map(|m| (m.start, m.end)),
+        );
+        descs.extend(
+            regex::matches(p, &e.desc)
+                .map_while(Result::ok)
+                .map(|m| (m.start, m.end)),
+        );
         if (paths.len(), descs.len()) == before && !hit(p, &e.pname) {
             return None;
         }
