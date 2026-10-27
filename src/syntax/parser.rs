@@ -674,15 +674,17 @@ impl<'a> Parser<'a> {
 
     /// `f a b c`: the arguments are collected first so they land in one
     /// run; a `func` that already is an `Apply` (the `or` argument hack)
-    /// is extended like `make_call` does.
+    /// is extended like `make_call` does. Extending copies the arguments, so
+    /// a long run is applied to instead, which means the same.
     fn parse_app(&mut self) -> R<ExprId> {
+        const MAX_EXTEND: u32 = 32;
         let f = self.parse_select()?;
         if !starts_simple(self.peek().kind) {
             return Ok(f);
         }
         let mark = self.sc_ids.len();
         let existing = match self.ast.exprs[f.0 as usize] {
-            Expr::Apply { args, .. } => {
+            Expr::Apply { args, .. } if args.len <= MAX_EXTEND => {
                 self.sc_ids.extend_from_slice(self.ast.ids(args));
                 true
             }

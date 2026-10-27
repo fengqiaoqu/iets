@@ -1,7 +1,7 @@
 //! `flake.lock` checks (lockfile.cc): the file must parse, and every node
 //! reachable from the root must be locked. `call-flake.nix` does the rest.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
 
@@ -116,12 +116,17 @@ fn is_locked(node: &Value) -> bool {
             .is_some_and(|p| !p.starts_with('/'))
 }
 
+/// What an input of a node resolved to, so a lock file that names one
+/// `follows` path many times resolves it once.
+type Memo<'a> = HashMap<(&'a str, &'a str), &'a str>;
+
 /// call-flake.nix:getInputByPath: follow a `follows` path from the root.
 fn resolve<'a>(
     nodes: &'a serde_json::Map<String, Value>,
     root: &'a str,
-    path: &[Value],
+    path: &'a [Value],
     depth: usize,
+    memo: &mut Memo<'a>,
 ) -> Result<&'a str> {
     if depth > 64 {
         return Err(Error::Flake("follow cycle".into()));
@@ -131,12 +136,18 @@ fn resolve<'a>(
         let Some(name) = elem.as_str() else {
             return Err(Error::Flake("follows path element is not a string".into()));
         };
+        if let Some(&to) = memo.get(&(cur, name)) {
+            cur = to;
+            continue;
+        }
         let Some(spec) = nodes.get(cur).and_then(|n| n["inputs"].get(name)) else {
             return Err(Error::Flake(format!(
                 "input '{name}' of node '{cur}' is missing"
             )));
         };
-        cur = resolve_spec(nodes, root, spec, depth + 1)?;
+        let to = resolve_spec(nodes, root, spec, depth + 1, memo)?;
+        memo.insert((cur, name), to);
+        cur = to;
     }
     Ok(cur)
 }
@@ -146,10 +157,11 @@ fn resolve_spec<'a>(
     root: &'a str,
     spec: &'a Value,
     depth: usize,
+    memo: &mut Memo<'a>,
 ) -> Result<&'a str> {
     match spec {
         Value::String(s) => Ok(s.as_str()),
-        Value::Array(p) => resolve(nodes, root, p, depth),
+        Value::Array(p) => resolve(nodes, root, p, depth, memo),
         _ => Err(Error::Flake(
             "input spec is neither a node name nor a follows path".into(),
         )),
@@ -173,6 +185,7 @@ pub fn check(bytes: &[u8]) -> Result<Lock> {
     // edges extend the input path the hint names
     let mut todo = vec![(root.as_str(), String::new())];
     let mut seen: HashSet<&str> = HashSet::new();
+    let mut memo = Memo::new();
     while let Some((key, path)) = todo.pop() {
         if !seen.insert(key) {
             continue;
@@ -189,7 +202,7 @@ pub fn check(bytes: &[u8]) -> Result<Lock> {
         }
         if let Some(inputs) = node["inputs"].as_object() {
             for (name, spec) in inputs {
-                let to = resolve_spec(nodes, &root, spec, 0)?;
+                let to = resolve_spec(nodes, &root, spec, 0, &mut memo)?;
                 if spec.is_string() {
                     let sep = if path.is_empty() { "" } else { "/" };
                     todo.push((to, format!("{path}{sep}{name}")));
