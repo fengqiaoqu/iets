@@ -6,7 +6,7 @@ use std::io;
 use std::mem;
 use std::os::windows::fs::{self as winfs, FileExt, MetadataExt, OpenOptionsExt};
 use std::os::windows::io::AsRawHandle;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf, Prefix};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use windows_sys::Win32::Storage::FileSystem::{
@@ -18,12 +18,39 @@ use windows_sys::Win32::Storage::FileSystem::{
 /// 100 ns ticks from 1601 to the Unix epoch.
 const EPOCH_TICKS: u64 = 116_444_736_000_000_000;
 
+/// Whether `name`, which holds no `/`, names one entry of its directory:
+/// no other separator, no stream, and no device.
+pub fn one_component(name: &[u8]) -> bool {
+    const DEVICES: [&[u8]; 4] = [b"con", b"prn", b"aux", b"nul"];
+    if name.iter().any(|&b| b == b'\\' || b == b':') || name.ends_with(b".") || name.ends_with(b" ")
+    {
+        return false;
+    }
+    let stem = name
+        .split(|&b| b == b'.')
+        .next()
+        .unwrap_or(name)
+        .to_ascii_lowercase();
+    let numbered = stem.len() == 4
+        && (stem.starts_with(b"com") || stem.starts_with(b"lpt"))
+        && stem[3].is_ascii_digit();
+    !DEVICES.contains(&stem.as_slice()) && !numbered
+}
+
+/// The kind of link follows what the target names. A UNC or device target
+/// is never looked up, so a restore makes no network request.
 pub fn symlink(target: impl AsRef<Path>, link: impl AsRef<Path>) -> io::Result<()> {
     let (target, link) = (target.as_ref(), link.as_ref());
+    let remote = matches!(
+        target.components().next(),
+        Some(Component::Prefix(p))
+            if matches!(p.kind(), Prefix::UNC(..) | Prefix::VerbatimUNC(..) | Prefix::DeviceNS(_))
+    );
     let resolved = link
         .parent()
         .map_or_else(|| target.to_owned(), |p| p.join(target));
-    if resolved.is_dir() {
+    let dir = !remote && resolved.is_dir();
+    if dir {
         winfs::symlink_dir(target, link)
     } else {
         winfs::symlink_file(target, link)
@@ -214,4 +241,20 @@ fn open_for_times(path: &Path, follow: bool) -> io::Result<File> {
         .write(true)
         .custom_flags(flags)
         .open(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_link_to_an_absolute_directory_is_a_directory_link() {
+        let d = tempfile::tempdir().unwrap();
+        let target = d.path().join("dir");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("f"), "x").unwrap();
+        let link = d.path().join("link");
+        symlink(&target, &link).unwrap();
+        assert_eq!(fs::read(link.join("f")).unwrap(), b"x");
+    }
 }

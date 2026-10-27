@@ -1006,6 +1006,15 @@ fn csi(b: &[u8], mut i: usize) -> (usize, u8) {
     }
 }
 
+/// Text a peer sent, safe to print: no escape sequences and no control
+/// characters, so it can neither move the cursor nor start a new line.
+pub fn plain(s: &str) -> String {
+    filter_ansi(s, true)
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect()
+}
+
 /// `s` without its ECMA-048 escape sequences.
 pub fn strip_ansi(s: &str) -> String {
     let b = s.as_bytes();
@@ -1250,6 +1259,9 @@ mod tests {
     fn ansi_stripping() {
         assert_eq!(strip_ansi("\x1b[1;32mgreen\x1b[0m"), "green");
         assert_eq!(strip_ansi("plain"), "plain");
+        assert_eq!(plain("a\x1b[2Jb\n@nix {}\r"), "ab@nix {}");
+        let link = "\x1b]8;;https://host\x1b\\build\x1b]8;;\x07";
+        assert_eq!(plain(link), "build");
         // `]` is one of the 7-bit C1 Fe bytes, so it goes with the ESC
         assert_eq!(strip_ansi("a\x1b]0;titl"), "a0;titl");
     }
