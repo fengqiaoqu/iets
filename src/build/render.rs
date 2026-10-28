@@ -22,6 +22,7 @@ use std::time::{Duration, Instant};
 use super::event::{BuildEvent, Kind, fmt_duration};
 
 use crate::log::{interactive, json, note_mismatch, strip_ansi};
+use crate::session::Session;
 use crate::store::path::find_store_prefix;
 use crate::sys::tty;
 
@@ -64,6 +65,9 @@ pub struct Style {
     pub color: bool,
     pub fold: bool,
     pub quiet: bool,
+    /// `IETS_PROGRESS`: the live region of running builds and the `⏵`
+    /// heartbeat. `false` draws neither.
+    pub progress: bool,
 }
 
 impl Style {
@@ -75,6 +79,7 @@ impl Style {
             color: color(),
             fold: actions_ci(),
             quiet: false,
+            progress: Session::current().settings().progress,
         }
     }
 }
@@ -214,7 +219,10 @@ impl Renderer {
     }
 
     fn is_live(&self) -> bool {
-        self.live.is_some() && self.style.mode == Mode::Tty && !self.style.quiet
+        self.live.is_some()
+            && self.style.mode == Mode::Tty
+            && !self.style.quiet
+            && self.style.progress
     }
 
     /// How often `heartbeat` should run.
@@ -751,7 +759,7 @@ impl Renderer {
             return;
         }
         self.check_stalls();
-        if self.running.is_empty() || self.style.quiet {
+        if self.running.is_empty() || self.style.quiet || !self.style.progress {
             return;
         }
         let mut builds: Vec<(String, Duration, Option<String>, bool)> = self
@@ -914,6 +922,7 @@ pub(super) mod tests {
             color: false,
             fold,
             quiet: false,
+            progress: true,
         };
         (Renderer::new(style, Box::new(s.clone())), s)
     }
@@ -1036,6 +1045,7 @@ pub(super) mod tests {
             color: false,
             fold: false,
             quiet: false,
+            progress: true,
         };
         let mut r = Renderer::new(style, Box::new(s.clone()));
         r.event(&ev(Kind::Started));
@@ -1060,6 +1070,7 @@ pub(super) mod tests {
             color: false,
             fold: false,
             quiet: false,
+            progress: true,
         };
         let r = Renderer::new(style, Box::new(s.clone()))
             .with_live(Box::new(move |l| f.lock().unwrap().push(l)));
@@ -1310,6 +1321,34 @@ pub(super) mod tests {
         r.event(&ev(Kind::Phase("configure".into())));
         r.heartbeat();
         assert!(text(&s).contains("⏵ 1 building: checks.x.a (0s, configure)"));
+    }
+
+    /// `IETS_PROGRESS=false`: no live region on a terminal, no `⏵` on a pipe.
+    #[test]
+    fn without_progress_nothing_is_drawn() {
+        let (r, _, frames) = live();
+        let mut r = Renderer {
+            style: Style {
+                progress: false,
+                ..r.style
+            },
+            ..r
+        };
+        r.event(&ev(Kind::Started));
+        r.heartbeat();
+        assert!(frames.lock().unwrap().iter().all(Vec::is_empty));
+
+        let (r, s) = ci(false);
+        let mut r = Renderer {
+            style: Style {
+                progress: false,
+                ..r.style
+            },
+            ..r
+        };
+        r.event(&ev(Kind::Started));
+        r.heartbeat();
+        assert!(!text(&s).contains("⏵"), "{}", text(&s));
     }
 
     #[test]

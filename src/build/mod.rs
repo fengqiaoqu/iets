@@ -148,7 +148,7 @@ impl Reporter {
         let mut render = Renderer::new(style, Box::new(SessionOut::default()));
         let mut live = None;
         // under internal-json the activity records carry the progress
-        if style.mode == render::Mode::Tty && !style.quiet && !log::json() {
+        if style.mode == render::Mode::Tty && !style.quiet && style.progress && !log::json() {
             let s = Session::current();
             s.log.progress.set_live(true);
             let sink = s.clone();
@@ -888,6 +888,7 @@ mod tests {
             color: false,
             fold: false,
             quiet: false,
+            progress: true,
         };
         let mut d = Dispatcher::with_backend(
             Box::new(Fan {
@@ -1025,6 +1026,7 @@ mod tests {
             color: false,
             fold: false,
             quiet: false,
+            progress: true,
         };
         let mut d = Dispatcher::with_backend(
             Box::new(Stops),
@@ -1055,6 +1057,7 @@ mod tests {
             color: false,
             fold: false,
             quiet: false,
+            progress: true,
         };
         let mut d = Dispatcher::with_backend(
             Box::new(Fan {
