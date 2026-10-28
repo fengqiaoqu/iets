@@ -486,6 +486,10 @@ impl EvalConfig {
         self.pure
     }
 
+    pub fn configured_project_root(&self) -> Option<&[u8]> {
+        self.project_root.as_deref()
+    }
+
     /// The project a pure evaluation may read below, with no flake
     /// (`crate::project`). The path must be absolute and hold no trailing
     /// slash, as `crate::project::find` returns it.

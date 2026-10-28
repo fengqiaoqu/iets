@@ -470,12 +470,22 @@ pub fn setup_cache_more(
     if a.no_tracing_cache || a.dump_drvs.is_some() {
         return None;
     }
+    Cache::open(
+        a.cache_dir.as_deref(),
+        cache_key(a, subcommand, cfg, more)?,
+        a.timings,
+    )
+}
+
+fn cache_key(a: &EvalArgs, subcommand: &str, cfg: &EvalConfig, more: &[String]) -> Option<Key> {
     let cwd = cwd();
     let mut k = Key::new(subcommand);
     if cfg.is_pure() {
         k.field("pure-eval", b"1");
-        if let Some(root) = project_root(a) {
-            k.field("project-root", &root);
+        // the root the evaluator enforces, which an embedder may have set
+        match cfg.configured_project_root() {
+            Some(root) => k.field("project-root", root),
+            None => k.field("no-project-root", b""),
         }
     }
     // the read set holds the file this names, but not the fact that another
@@ -551,5 +561,25 @@ pub fn setup_cache_more(
     if needs_cwd {
         k.field("cwd", &cwd);
     }
-    Cache::open(a.cache_dir.as_deref(), k, a.timings)
+    Some(k)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_cache_key_holds_the_enforced_project_root() {
+        let mut a = EvalArgs::new();
+        a.input = Some(Input::Expr("1".into()));
+        let key = |root: Option<&[u8]>| {
+            let cfg = EvalConfig::new()
+                .pure(true)
+                .project_root(root.map(<[u8]>::to_vec));
+            cache_key(&a, "eval", &cfg, &[]).unwrap().finish()
+        };
+        let none = key(None);
+        assert_ne!(key(Some(b"/a")), key(Some(b"/b")));
+        assert_ne!(key(Some(b"/a")), none);
+    }
 }
