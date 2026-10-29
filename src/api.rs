@@ -170,10 +170,15 @@ pub enum Input {
     Flake(String),
 }
 
-/// A `-I prefix=path` (or `-I path`) entry as an absolute pair.
+/// A `-I prefix=path` (or `-I path`) entry a pair.
 pub fn parse_include(s: &str) -> (Vec<u8>, Vec<u8>) {
     let (prefix, path) = s.split_once('=').unwrap_or(("", s));
-    (argv::bytes(prefix), abs_path(path, &cwd()))
+    let path = if path.starts_with("flake:") {
+        argv::bytes(path)
+    } else {
+        abs_path(path, &cwd())
+    };
+    (argv::bytes(prefix), path)
 }
 
 fn home() -> Option<Vec<u8>> {
@@ -414,7 +419,7 @@ pub fn abs_path(f: &str, cwd: &[u8]) -> Vec<u8> {
 }
 
 /// `-I` entries first, then `NIX_PATH`, then the `nix-path` setting of the
-/// nix.conf this run loaded, as absolute `(prefix, path)` pairs. Nix's channel
+/// nix.conf this run loaded, as `(prefix, path)` pairs. Nix's channel
 /// defaults are not here.
 pub fn full_includes(includes: &[(Vec<u8>, Vec<u8>)]) -> Vec<(Vec<u8>, Vec<u8>)> {
     let session = Session::current();
@@ -425,7 +430,7 @@ pub fn full_includes(includes: &[(Vec<u8>, Vec<u8>)]) -> Vec<(Vec<u8>, Vec<u8>)>
     let env = env::var("NIX_PATH").ok().filter(|_| !replaces);
     let env = env
         .iter()
-        .flat_map(|np| np.split(':'))
+        .flat_map(|np| split_search_paths(np))
         .filter(|s| !s.is_empty());
     let mut all = includes.to_vec();
     all.extend(
@@ -433,6 +438,23 @@ pub fn full_includes(includes: &[(Vec<u8>, Vec<u8>)]) -> Vec<(Vec<u8>, Vec<u8>)>
             .map(parse_include),
     );
     all
+}
+
+/// Split search paths by `:`, with special handling for flake references
+fn split_search_paths(path: &str) -> Vec<&str> {
+    let mut entries = Vec::new();
+    let mut start = 0;
+    for (end, _) in path.match_indices(':') {
+        let entry = &path[start..end];
+        let value = entry.split_once('=').map_or(entry, |(_, value)| value);
+        if value == "flake" {
+            continue;
+        }
+        entries.push(entry);
+        start = end + 1;
+    }
+    entries.push(&path[start..]);
+    entries
 }
 
 /// The derivations to build and the outputs to print: `wanted` plus the

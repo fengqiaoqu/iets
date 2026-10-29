@@ -1022,6 +1022,14 @@ impl Evaluator {
                 continue;
             }
             let suffix = &name[if sep { n + 1 } else { n }..];
+            if path.starts_with(b"flake:") {
+                bail!(
+                    ErrorKind::Unsupported,
+                    pos,
+                    "flake references in search paths are not supported: {:?}",
+                    String::from_utf8_lossy(path),
+                );
+            }
             store_hooks::open(self, path, pos)?;
             let mut candidate = path.clone();
             if !suffix.is_empty() {
