@@ -19,9 +19,13 @@ use windows_sys::Win32::Storage::FileSystem::{
 const EPOCH_TICKS: u64 = 116_444_736_000_000_000;
 
 /// Whether `name`, which holds no `/`, names one entry of its directory:
-/// no other separator, no stream, and no device.
+/// no other separator, no stream, and no device. The devices are the
+/// reserved names of "Naming Files, Paths, and Namespaces": CON, PRN, AUX,
+/// NUL, CONIN$, CONOUT$, COM and LPT with a digit or a superscript digit,
+/// with or without an extension.
 pub fn one_component(name: &[u8]) -> bool {
-    const DEVICES: [&[u8]; 4] = [b"con", b"prn", b"aux", b"nul"];
+    const DEVICES: [&[u8]; 6] = [b"con", b"prn", b"aux", b"nul", b"conin$", b"conout$"];
+    const SUPERSCRIPTS: [&[u8]; 3] = ["¹".as_bytes(), "²".as_bytes(), "³".as_bytes()];
     if name.iter().any(|&b| b == b'\\' || b == b':') || name.ends_with(b".") || name.ends_with(b" ")
     {
         return false;
@@ -31,26 +35,43 @@ pub fn one_component(name: &[u8]) -> bool {
         .next()
         .unwrap_or(name)
         .to_ascii_lowercase();
-    let numbered = stem.len() == 4
-        && (stem.starts_with(b"com") || stem.starts_with(b"lpt"))
-        && stem[3].is_ascii_digit();
+    let numbered = match stem
+        .strip_prefix(b"com")
+        .or_else(|| stem.strip_prefix(b"lpt"))
+    {
+        Some([d]) => d.is_ascii_digit(),
+        Some(rest) => SUPERSCRIPTS.contains(&rest),
+        None => false,
+    };
     !DEVICES.contains(&stem.as_slice()) && !numbered
 }
 
-/// The kind of link follows what the target names. A UNC or device target
-/// is never looked up, so a restore makes no network request.
+/// The kind of link follows what the target names. A target on the network
+/// or in a device namespace is not looked up and gets no link: a restore
+/// makes no network request, and a link of the wrong kind would be broken.
 pub fn symlink(target: impl AsRef<Path>, link: impl AsRef<Path>) -> io::Result<()> {
     let (target, link) = (target.as_ref(), link.as_ref());
     let remote = matches!(
         target.components().next(),
         Some(Component::Prefix(p))
-            if matches!(p.kind(), Prefix::UNC(..) | Prefix::VerbatimUNC(..) | Prefix::DeviceNS(_))
+            if matches!(
+                p.kind(),
+                Prefix::UNC(..) | Prefix::VerbatimUNC(..) | Prefix::DeviceNS(_) | Prefix::Verbatim(_)
+            )
     );
+    if remote {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "no link to '{}': a network or device path",
+                target.display()
+            ),
+        ));
+    }
     let resolved = link
         .parent()
         .map_or_else(|| target.to_owned(), |p| p.join(target));
-    let dir = !remote && resolved.is_dir();
-    if dir {
+    if resolved.is_dir() {
         winfs::symlink_dir(target, link)
     } else {
         winfs::symlink_file(target, link)
@@ -256,5 +277,49 @@ mod tests {
         let link = d.path().join("link");
         symlink(&target, &link).unwrap();
         assert_eq!(fs::read(link.join("f")).unwrap(), b"x");
+    }
+
+    #[test]
+    fn a_network_or_device_target_gets_no_link() {
+        let d = tempfile::tempdir().unwrap();
+        for t in [
+            r"\\server\share\dir",
+            r"\\?\UNC\server\share",
+            r"\\.\PhysicalDrive0",
+            r"\\?\GLOBALROOT\Device\Mup\server\share",
+        ] {
+            let e = symlink(t, d.path().join("link")).unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::Unsupported, "{t}");
+        }
+        assert!(!d.path().join("link").exists());
+    }
+
+    #[test]
+    fn reserved_names_are_not_entries() {
+        for n in [
+            "con",
+            "CON.txt",
+            "prn",
+            "aux.",
+            "nul",
+            "conin$",
+            "CONOUT$",
+            "com1",
+            "COM9.log",
+            "lpt0",
+            "com¹",
+            "LPT³.x",
+            "a:b",
+            "a\\b",
+            "trailing ",
+            "trailing.",
+        ] {
+            assert!(!one_component(n.as_bytes()), "{n}");
+        }
+        for n in [
+            "con1", "comx", "com10", "lpt", "common", "console", "file.con", "a.b",
+        ] {
+            assert!(one_component(n.as_bytes()), "{n}");
+        }
     }
 }
