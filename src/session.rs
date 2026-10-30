@@ -118,6 +118,11 @@ impl Session {
         let _ = self.settings.set(s);
         Ok(())
     }
+
+    /// Settings made elsewhere, for a run whose file did not load.
+    pub fn use_settings(&self, s: Settings) {
+        let _ = self.settings.set(s);
+    }
 }
 
 pub struct Exit(pub i32);

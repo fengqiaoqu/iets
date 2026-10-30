@@ -28,7 +28,7 @@ const KEYS: &[&str] = &[
     "fiber-stack-mb",
     "fix-hashes",
     "nix-bin-dir",
-    "no-fallback",
+    "nix-fallback",
     "provenance",
     "pure",
     "shell-gc-root",
@@ -117,8 +117,10 @@ pub struct Settings {
     pub pure: bool,
     /// `nix-bin-dir`, `IETS_NIX_BIN_DIR`: where the real Nix binaries live.
     pub nix_bin_dir: Option<PathBuf>,
-    /// `no-fallback`, `IETS_NO_FALLBACK`: fail instead of running the real Nix.
-    pub no_fallback: bool,
+    /// `nix-fallback`, `IETS_NIX_FALLBACK`: when a classic command runs the
+    /// real Nix. `auto` for what iets does not handle, `always` for every
+    /// command, `never` not at all (docs/reference/classic.md).
+    pub nix_fallback: NixFallback,
     /// `shell-gc-root`: `nix-shell` and `nix develop` keep the closure they
     /// entered alive with a link in iets's roots store
     /// (docs/explanation/caching.md). `false` keeps none, for a small disk.
@@ -156,6 +158,24 @@ pub enum FixHashes {
     Ask,
     Always,
     Never,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NixFallback {
+    Auto,
+    Always,
+    Never,
+}
+
+impl NixFallback {
+    fn parse(s: &str) -> Option<NixFallback> {
+        Some(match s {
+            "auto" => NixFallback::Auto,
+            "always" => NixFallback::Always,
+            "never" => NixFallback::Never,
+            _ => return None,
+        })
+    }
 }
 
 /// The flag every iets command accepts, in classic mode too. It is ours, so
@@ -329,6 +349,12 @@ impl Settings {
                 _ => None,
             },
         )?;
+        let nix_fallback = match nix_fallback_var(env)? {
+            Some(f) => Some(f),
+            None => c.get("nix-fallback", "\"auto\", \"always\" or \"never\"", |v| {
+                NixFallback::parse(v.as_str()?)
+            })?,
+        };
         Ok(Settings {
             builder: c
                 .get(
@@ -363,7 +389,7 @@ impl Settings {
             provenance: env.flag("IETS_PROVENANCE", c.bool("provenance")?, true)?,
             pure: c.bool("pure")?.unwrap_or(true),
             nix_bin_dir: env.dir("IETS_NIX_BIN_DIR").or(c.str("nix-bin-dir")?),
-            no_fallback: env.flag("IETS_NO_FALLBACK", c.bool("no-fallback")?, false)?,
+            nix_fallback: nix_fallback.unwrap_or(NixFallback::Auto),
             shell_gc_root: c.bool("shell-gc-root")?.unwrap_or(true),
             build_gc_root: c.bool("build-gc-root")?.unwrap_or(true),
             fetching: env.set("IETS_FETCHING"),
@@ -526,6 +552,40 @@ fn env_bool(name: &str, v: &OsStr) -> Result<bool> {
     config::parse_bool(name, v.to_str().ok_or_else(bad)?).map_err(|_| bad())
 }
 
+/// `IETS_NIX_FALLBACK=always` from the environment alone: a classic command
+/// runs the real Nix before iets reads anything else, the settings file
+/// included, so the switch works when a setting is broken.
+pub fn fallback_forced() -> Result<bool> {
+    fallback_forced_from(&Env(session_var))
+}
+
+fn fallback_forced_from(env: &Env) -> Result<bool> {
+    Ok(nix_fallback_var(env)? == Some(NixFallback::Always))
+}
+
+impl Settings {
+    /// What a forced fallback needs when the settings do not load: where
+    /// the real Nix is. From the environment alone, like the switch.
+    pub fn for_fallback() -> Settings {
+        Settings {
+            nix_bin_dir: Env(session_var).dir("IETS_NIX_BIN_DIR"),
+            nix_fallback: NixFallback::Always,
+            ..Settings::default()
+        }
+    }
+}
+
+fn nix_fallback_var(env: &Env) -> Result<Option<NixFallback>> {
+    let Some(v) = env.str("IETS_NIX_FALLBACK") else {
+        return Ok(None);
+    };
+    NixFallback::parse(&v).map(Some).ok_or_else(|| {
+        Error::Config(format!(
+            "IETS_NIX_FALLBACK: '{v}' is not auto, always or never"
+        ))
+    })
+}
+
 /// The environment a load reads: the session's, or a test's.
 struct Env(fn(&str) -> Option<OsString>);
 
@@ -565,7 +625,7 @@ impl Env {
 
     /// The environment wins over the file, which wins over `default`. The
     /// value is a nix.conf Boolean, so `IETS_CACHE=false` turns the cache
-    /// off and `IETS_NO_FALLBACK=yes` turns the fallback off.
+    /// off and `IETS_PROVENANCE=no` turns provenance off.
     fn flag(&self, name: &str, file: Option<bool>, default: bool) -> Result<bool> {
         match (self.0)(name) {
             Some(v) => env_bool(name, &v),
@@ -586,6 +646,18 @@ mod tests {
 
     const NO_ENV: Env = Env(|_| None);
 
+    #[test]
+    fn a_forced_fallback_comes_from_the_environment_alone() {
+        assert!(!fallback_forced_from(&NO_ENV).unwrap());
+        let always = Env(|n| (n == "IETS_NIX_FALLBACK").then(|| "always".into()));
+        assert!(fallback_forced_from(&always).unwrap());
+        let never = Env(|n| (n == "IETS_NIX_FALLBACK").then(|| "never".into()));
+        assert!(!fallback_forced_from(&never).unwrap());
+        let s = Settings::load_from(Path::new("/nonexistent"), &[], &never).unwrap();
+        assert_eq!(s.nix_fallback, NixFallback::Never);
+        let bad = Env(|n| (n == "IETS_NIX_FALLBACK").then(|| "maybe".into()));
+        assert!(fallback_forced_from(&bad).is_err());
+    }
     /// Where the user file goes under `d`. Nothing writes it yet.
     fn user_file(d: &Path) -> PathBuf {
         fs::create_dir_all(d.join("user")).unwrap();
@@ -725,7 +797,7 @@ mod tests {
         assert_eq!(s.fix_hashes, FixHashes::Ask);
         assert!(s.cache && s.provenance && s.shell_gc_root && s.build_gc_root);
         assert!(s.pure);
-        assert!(!s.no_fallback);
+        assert_eq!(s.nix_fallback, NixFallback::Auto);
     }
 
     #[test]
@@ -794,7 +866,10 @@ mod tests {
     )]
     #[case("workers = -1", "'workers' wants an integer, got -1")]
     #[case("cache = \"no\"", "'cache' wants true or false, got \"no\"")]
-    #[case("no-fallback = 1", "'no-fallback' wants true or false, got 1")]
+    #[case(
+        "nix-fallback = 1",
+        "'nix-fallback' wants \"auto\", \"always\" or \"never\", got 1"
+    )]
     #[case(
         "builder = 4",
         "'builder' wants a URL, or a list of URLs or {url, systems, features} tables, got 4"

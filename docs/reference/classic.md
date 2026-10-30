@@ -473,7 +473,8 @@ iets: falling back to nix-instantiate: '--parse' is not implemented
 | variable | effect |
 |---|---|
 | `IETS_NIX_BIN_DIR` | the directory the real binary is taken from |
-| `IETS_NO_FALLBACK=1` (any nix.conf Boolean) | print the reason and exit 1 instead of exec'ing |
+| `IETS_NIX_FALLBACK=never` (`nix-fallback = "never"` in `iets.toml`) | print the reason and exit 1 instead of exec'ing |
+| `IETS_NIX_FALLBACK=always` | run the real binary before iets reads anything else, the settings file included, so a broken setting does not stop it |
 
 iets looks for the real binary in this order:
 

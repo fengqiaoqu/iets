@@ -174,7 +174,7 @@ fn classic_nix_build() {
     ];
     let ours = s
         .iets_as(&nix)
-        .env("IETS_NO_FALLBACK", "1")
+        .env("IETS_NIX_FALLBACK", "never")
         .args(["build", "--store", &g.url])
         .args(tail)
         .output()
@@ -192,7 +192,7 @@ fn classic_nix_build() {
     let link = s.dir().join("c5/result");
     let r = s
         .iets_as(&nix)
-        .env("IETS_NO_FALLBACK", "1")
+        .env("IETS_NIX_FALLBACK", "never")
         .args(["build", "--store", &g.url, "--eval-store", "auto", "-o"])
         .arg(&link)
         .args(["--print-out-paths", "-f", &case])
