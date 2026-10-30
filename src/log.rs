@@ -68,16 +68,22 @@ struct Out {
     landed: Option<(usize, usize)>,
 }
 
-/// Where the cursor is after `bytes` went out from column 1 of `row`.
+/// Where the cursor is after `bytes` went out from column 1 of `row`. A
+/// last line that fills its row exactly leaves the cursor past the edge,
+/// waiting to wrap, so `col` is `cols + 1`.
 fn landing(bytes: &[u8], mut row: usize, (cols, rows): Size) -> (usize, usize) {
+    let text = String::from_utf8_lossy(bytes);
+    let mut lines = text.split('\n').peekable();
     let mut col = 1;
-    for (i, line) in String::from_utf8_lossy(bytes).split('\n').enumerate() {
-        if i > 0 {
-            (row, col) = (row + 1, 1);
-        }
+    while let Some(line) = lines.next() {
         let w = visible_width(line.trim_end_matches('\r'));
-        row += w / cols;
-        col += w % cols;
+        let wrapped = w.div_ceil(cols).saturating_sub(1);
+        if lines.peek().is_some() {
+            row += wrapped + 1;
+        } else {
+            row += wrapped;
+            col = w - wrapped * cols + 1;
+        }
     }
     (row.min(rows), col)
 }
@@ -1234,11 +1240,13 @@ mod tests {
     /// the region starts on the bottom row, and the newline under the value
     /// scrolls the screen.
     #[rstest::rstest]
-    fn stdout_under_the_region_stays_when_the_region_goes(#[values(true, false)] answers: bool) {
+    fn stdout_under_the_region_stays_when_the_region_goes(
+        #[values(true, false)] answers: bool,
+        #[values("/nix/store/x-a.drv", "/nix/store/a-value-that-fills-the-row-xy")] value: &str,
+    ) {
         let (log, mut s) = Screen::log(40, 8);
         s.answers.store(answers, Ordering::Relaxed);
         log.set_region(vec!["evaluating".into()]);
-        let value = "/nix/store/x-a.drv";
         log.with_display_down(value.as_bytes(), || s.write_all(value.as_bytes()))
             .unwrap();
         let rows = s.rows();
@@ -1257,6 +1265,9 @@ mod tests {
         assert_eq!(landing(b"abc\n", 3, (10, 24)), (4, 1));
         assert_eq!(landing(b"abc\r\nde\n", 3, (10, 24)), (5, 1));
         assert_eq!(landing(b"0123456789abc", 3, (10, 24)), (4, 4));
+        assert_eq!(landing(b"0123456789", 3, (10, 24)), (3, 11));
+        assert_eq!(landing(b"0123456789\n", 3, (10, 24)), (4, 1));
+        assert_eq!(landing(b"0123456789\nabc", 3, (10, 24)), (4, 4));
         assert_eq!(landing(b"a\nb\nc\n", 23, (10, 24)), (24, 1));
     }
 
