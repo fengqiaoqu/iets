@@ -2,6 +2,7 @@
 
 pub mod coerce;
 pub mod error;
+pub mod search_path;
 
 #[cfg(test)]
 mod tests;
@@ -1022,12 +1023,12 @@ impl Evaluator {
                 continue;
             }
             let suffix = &name[if sep { n + 1 } else { n }..];
-            if path.starts_with(b"flake:") {
+            if search_path::is_url(path) {
                 bail!(
                     ErrorKind::Unsupported,
                     pos,
-                    "flake references in search paths are not supported: {:?}",
-                    String::from_utf8_lossy(path),
+                    "the search path entry '{}' is a URL, which iets does not fetch",
+                    String::from_utf8_lossy(path)
                 );
             }
             store_hooks::open(self, path, pos)?;

@@ -186,6 +186,9 @@ Flags: `--json`, `--raw`, `--expr E`, `-f`/`--file FILE`, `--impure`,
 `-L`/`--print-build-logs`.
 
 - `-L` has no effect: an evaluation that would build falls back.
+- A search path entry that is a URL (`flake:nixpkgs`, `channel:nixos-unstable`,
+  `https://…`) is split as Nix splits it, and `<name>` falls back when it
+  reaches that entry: iets fetches no search path entry.
 
 - `nix` evaluates purely unless you say otherwise, and `-f` is impure
   (`docs/explanation/evaluation.md`).
