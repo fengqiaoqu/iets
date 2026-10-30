@@ -97,6 +97,9 @@ impl Parser<'_> {
         while self.peek() == Some(b'|') {
             self.i += 1;
             self.states += 3;
+            if self.states > STATE_LIMIT + 1 {
+                return Err(Error::TooBig);
+            }
             branches.push(self.branch()?);
         }
         Ok(if branches.len() == 1 {
@@ -148,6 +151,10 @@ impl Parser<'_> {
                 return Err(Error::TooBig);
             }
             node = Node::Rep(Box::new(node), q);
+        }
+        // the state a quantifier would add is not made yet
+        if self.states > STATE_LIMIT + 1 {
+            return Err(Error::TooBig);
         }
         Ok(node)
     }
@@ -390,6 +397,12 @@ pub struct Prog {
     anchored: bool,
 }
 
+impl Prog {
+    pub fn size(&self) -> usize {
+        self.insts.len() * mem::size_of::<Inst>() + self.sets.len() * mem::size_of::<ByteSet>()
+    }
+}
+
 struct Compiler {
     insts: Vec<Inst>,
     sets: Vec<ByteSet>,
@@ -597,7 +610,14 @@ struct Exec<'a> {
     stack: Vec<Frame>,
     /// Matches reached so far; see `Frame::Opt`.
     seen: u64,
+    /// Steps left: backtracking can take exponential time, and libstdc++
+    /// would overflow its stack where this stops.
+    steps: u64,
 }
+
+/// A match that took more steps than its input can justify.
+#[derive(Debug, PartialEq)]
+pub struct TooComplex;
 
 fn eat(ok: bool, pos: &mut usize) -> bool {
     *pos += ok as usize;
@@ -612,6 +632,10 @@ impl<'a> Exec<'a> {
             regs: vec![NONE; prog.nregs],
             stack: Vec::new(),
             seen: 0,
+            steps: (hay.len() as u64 + 1)
+                .saturating_mul(prog.insts.len() as u64)
+                .saturating_mul(64)
+                .saturating_add(1 << 24),
         }
     }
 
@@ -635,6 +659,10 @@ impl<'a> Exec<'a> {
         let mut best: Option<(usize, Vec<usize>)> = None;
         let (mut pc, mut pos) = (0usize, start);
         'run: loop {
+            self.steps = self.steps.saturating_sub(1);
+            if self.steps == 0 {
+                return None;
+            }
             let ok = match insts[pc] {
                 Inst::Byte(b) => eat(hay.get(pos) == Some(&b), &mut pos),
                 Inst::Set(s) => eat(
@@ -754,23 +782,37 @@ pub struct Match {
     pub groups: Vec<Option<(usize, usize)>>,
 }
 
+type Groups = Vec<Option<(usize, usize)>>;
+
 /// The capture groups when the whole of `hay` matches.
-pub fn match_exact(prog: &Prog, hay: &[u8]) -> Option<Vec<Option<(usize, usize)>>> {
+pub fn match_exact(prog: &Prog, hay: &[u8]) -> Result<Option<Groups>, TooComplex> {
     if let Some(f) = &prog.first
         && hay.first().is_none_or(|&b| !f[b as usize])
     {
-        return None;
+        return Ok(None);
     }
-    let (_, regs) = Exec::new(prog, hay).run(0, Mode::Full)?;
-    Some(groups(prog, &regs))
+    let mut ex = Exec::new(prog, hay);
+    let found = ex.run(0, Mode::Full);
+    if ex.steps == 0 {
+        return Err(TooComplex);
+    }
+    Ok(found.map(|(_, regs)| groups(prog, &regs)))
 }
 
 /// Successive matches in `std::regex_iterator` order: after an empty match
 /// a non-empty one is tried at the same position before moving one byte on.
-pub fn matches<'a>(prog: &'a Prog, hay: &'a [u8]) -> impl Iterator<Item = Match> + 'a {
+/// The last item is `Err` when the matches took too many steps.
+pub fn matches<'a>(
+    prog: &'a Prog,
+    hay: &'a [u8],
+) -> impl Iterator<Item = Result<Match, TooComplex>> + 'a {
     let mut ex = Exec::new(prog, hay);
     let mut next = ex.search(0, false, false);
+    let mut failed = false;
     iter::from_fn(move || {
+        if ex.steps == 0 {
+            return (!mem::replace(&mut failed, true)).then_some(Err(TooComplex));
+        }
         let m = next.take()?;
         next = if m.start < m.end {
             ex.search(m.end, false, false)
@@ -780,7 +822,7 @@ pub fn matches<'a>(prog: &'a Prog, hay: &'a [u8]) -> impl Iterator<Item = Match>
         } else {
             None
         };
-        Some(m)
+        Some(Ok(m))
     })
 }
 
@@ -793,7 +835,7 @@ mod tests {
 
     fn caps(re: &str, s: &str) -> Option<Vec<Option<String>>> {
         let p = compile(re.as_bytes()).unwrap();
-        match_exact(&p, s.as_bytes()).map(|g| {
+        match_exact(&p, s.as_bytes()).unwrap().map(|g| {
             g.into_iter()
                 .map(|g| g.map(|(a, b)| s[a..b].to_string()))
                 .collect()
@@ -824,6 +866,12 @@ mod tests {
         assert_eq!(compile(b"(a){24998}").err(), Some(Error::TooBig));
         assert_eq!(compile(b"a{99999}\\").err(), Some(Error::Invalid));
         assert_eq!(compile(b"a{2147483648}").err(), Some(Error::Invalid));
+        // atoms count without a quantifier too, as in Nix
+        assert!(compile(&b"[a]".repeat(99996)).is_ok());
+        assert_eq!(compile(&b"[a]".repeat(99997)).err(), Some(Error::TooBig));
+        // and so do empty branches
+        assert!(compile(&b"|".repeat(33332)).is_ok());
+        assert_eq!(compile(&b"|".repeat(33333)).err(), Some(Error::TooBig));
     }
 
     /// `REGEX_BENCH=1 cargo test --release regex_bench -- --ignored --nocapture`
@@ -849,7 +897,7 @@ mod tests {
                 for _ in 0..200 {
                     for s in &inputs {
                         if kind == "m" {
-                            hint::black_box(match_exact(&prog, s));
+                            hint::black_box(match_exact(&prog, s).ok());
                         } else {
                             hint::black_box(matches(&prog, s).count());
                         }

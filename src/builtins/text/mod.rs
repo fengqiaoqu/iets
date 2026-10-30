@@ -7,6 +7,7 @@ pub(crate) mod regex;
 mod xml;
 
 use std::cell::RefCell;
+use std::cmp::Ordering;
 use std::collections::VecDeque;
 use std::rc::Rc;
 use std::time::{self, SystemTime};
@@ -18,7 +19,7 @@ use crate::builtins::store_hooks::{self, Follow};
 use crate::eval::{Error, ErrorKind, EvalResult, Evaluator, Pos, bail};
 use crate::lint::{coerce, purity};
 use crate::log;
-use crate::runtime::{Ctx, ListObj, StringObj, Word, ctx_to_arena};
+use crate::runtime::{Ctx, ListObj, StringObj, Value, Word, ctx_to_arena};
 use crate::store::hash::{Hash, HashAlgo, HashFormat, hash_bytes};
 use crate::syntax::symbol::FxHashMap;
 
@@ -58,14 +59,24 @@ pub(super) fn current_time(ev: &mut Evaluator, _args: &[Word], _pos: Pos) -> Eva
 /// no run state: a pattern compiles the same way in every session.
 type CompiledRegex = Result<regex::Prog, regex::Error>;
 
+#[derive(Default)]
+struct RegexCache {
+    map: FxHashMap<Vec<u8>, Rc<CompiledRegex>>,
+    /// What the programs hold, so many large patterns cannot pile up.
+    bytes: usize,
+}
+
+/// More than nixpkgs' patterns need many times over.
+const REGEX_CACHE_BYTES: usize = 64 << 20;
+
 thread_local! {
-    static REGEX_CACHE: RefCell<FxHashMap<Vec<u8>, Rc<CompiledRegex>>> = RefCell::new(FxHashMap::default());
+    static REGEX_CACHE: RefCell<RegexCache> = RefCell::new(RegexCache::default());
 }
 
 /// Entries in this thread's regex cache (`IETS_STATS`).
 #[inline(never)]
 pub fn regex_cache_len() -> usize {
-    REGEX_CACHE.with(|c| c.borrow().len())
+    REGEX_CACHE.with(|c| c.borrow().map.len())
 }
 
 fn invalid_regex(re: &[u8], e: regex::Error, pos: Pos) -> Box<Error> {
@@ -86,13 +97,33 @@ fn invalid_regex(re: &[u8], e: regex::Error, pos: Pos) -> Box<Error> {
 fn get_regex(re: &[u8]) -> Rc<CompiledRegex> {
     REGEX_CACHE.with(|c| {
         let mut c = c.borrow_mut();
-        if let Some(r) = c.get(re) {
+        if let Some(r) = c.map.get(re) {
             return r.clone();
         }
         let r = Rc::new(regex::compile(re));
-        c.insert(re.to_vec(), r.clone());
+        let size = re.len() + r.as_ref().as_ref().map_or(0, regex::Prog::size);
+        if size > REGEX_CACHE_BYTES {
+            return r;
+        }
+        if c.bytes + size > REGEX_CACHE_BYTES {
+            c.map.clear();
+            c.bytes = 0;
+        }
+        c.bytes += size;
+        c.map.insert(re.to_vec(), r.clone());
         r
     })
+}
+
+fn too_complex(re: &[u8], pos: Pos) -> Box<Error> {
+    Error::boxed(
+        ErrorKind::Eval,
+        format!(
+            "the regular expression '{}' backtracks too much on its input",
+            String::from_utf8_lossy(re)
+        ),
+        pos,
+    )
 }
 
 /// Refuses an invalid regex before the string is forced, as prim_match and
@@ -137,7 +168,8 @@ fn match_(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
         Ok(p) => p,
         Err(e) => return Err(invalid_regex(re, *e, pos)),
     };
-    let Some(groups) = regex::match_exact(prog, s.bytes) else {
+    let found = regex::match_exact(prog, s.bytes).map_err(|_| too_complex(re, pos))?;
+    let Some(groups) = found else {
         return Ok(Word::NULL);
     };
     Ok(Word::from_ref(group_list(ev, &groups, s.bytes)))
@@ -167,6 +199,7 @@ fn split(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {
     let mut items: Vec<Word> = Vec::new();
     let mut prev_end = 0;
     for m in regex::matches(prog, hay) {
+        let m = m.map_err(|_| too_complex(re, pos))?;
         items.push(ev.arena.mk_string_static(&hay[prev_end..m.start], &[]));
         items.push(Word::from_ref(group_list(ev, &m.groups, hay)));
         prev_end = m.end;
@@ -486,8 +519,7 @@ fn generic_closure(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Wo
         "while evaluating the 'operator' attribute passed as argument to builtins.genericClosure",
     )?;
     let key_sym = ev.sym(b"key");
-    // keys seen so far, ordered by `<`, like Nix's std::map<Value*, CompareValues>
-    let mut keys: Vec<Word> = Vec::new();
+    let mut keys = ClosureKeys::default();
     let mut res: Vec<Word> = Vec::new();
     while let Some(e) = work.pop_front() {
         let ea = ev.force_attrs(e, Pos::NONE, "").map_err(|mut err| {
@@ -499,23 +531,9 @@ fn generic_closure(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Wo
             return Err(missing_attr("key", "in genericClosure element", pos));
         };
         let kv = ev.force_cell(&key.cell)?;
-        let (mut lo, mut hi) = (0usize, keys.len());
-        let mut found = false;
-        while lo < hi {
-            let mid = (lo + hi) / 2;
-            if ev.less_than(keys[mid], kv, Pos::NONE)? {
-                lo = mid + 1;
-            } else if ev.less_than(kv, keys[mid], Pos::NONE)? {
-                hi = mid;
-            } else {
-                found = true;
-                break;
-            }
-        }
-        if found {
+        if !keys.insert(ev, kv)? {
             continue;
         }
-        keys.insert(lo, kv);
         res.push(e);
         let new = ev.call1(op, e, Pos::NONE)?;
         let nl = ev.force_list(
@@ -529,6 +547,81 @@ fn generic_closure(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Wo
         }
     }
     Ok(ev.mk_list(&res))
+}
+
+/// The keys `genericClosure` has seen, equal when neither is `<` the other,
+/// like Nix's std::map<Value*, CompareValues>. Integers, strings and paths,
+/// what keys nearly always are, go in a hash set. Any other key moves every
+/// key to a list ordered by `<`.
+#[derive(Default)]
+struct ClosureKeys {
+    hashed: FxHashMap<(u8, Vec<u8>), Word>,
+    /// A key of the kind the hashed ones are, for the error `<` gives a key
+    /// of another kind.
+    first: Option<(u8, Word)>,
+    ordered: Option<Vec<Word>>,
+}
+
+impl ClosureKeys {
+    fn hash_key(w: Word) -> Option<(u8, Vec<u8>)> {
+        Some(match w.view() {
+            Value::Int(n) => (0, n.to_le_bytes().to_vec()),
+            Value::String(s) => (1, s.bytes.to_vec()),
+            Value::Path(p) => (2, p.path.to_vec()),
+            _ => return None,
+        })
+    }
+
+    fn insert(&mut self, ev: &mut Evaluator, kv: Word) -> EvalResult<bool> {
+        if self.ordered.is_none() {
+            match Self::hash_key(kv) {
+                Some(k) => match self.first {
+                    Some((kind, w)) if kind != k.0 => {
+                        // raises the error Nix's comparison raises
+                        ev.less_than(w, kv, Pos::NONE)?;
+                        self.order(ev)?;
+                    }
+                    _ => {
+                        self.first.get_or_insert((k.0, kv));
+                        return Ok(self.hashed.insert(k, kv).is_none());
+                    }
+                },
+                None => self.order(ev)?,
+            }
+        }
+        let keys = self.ordered.as_mut().expect("ordered");
+        let (mut lo, mut hi) = (0usize, keys.len());
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            if ev.less_than(keys[mid], kv, Pos::NONE)? {
+                lo = mid + 1;
+            } else if ev.less_than(kv, keys[mid], Pos::NONE)? {
+                hi = mid;
+            } else {
+                return Ok(false);
+            }
+        }
+        keys.insert(lo, kv);
+        Ok(true)
+    }
+
+    fn order(&mut self, ev: &mut Evaluator) -> EvalResult<()> {
+        let mut words: Vec<Word> = self.hashed.drain().map(|(_, w)| w).collect();
+        let mut err = None;
+        words.sort_by(|a, b| match ev.less_than(*a, *b, Pos::NONE) {
+            Ok(true) => Ordering::Less,
+            Ok(false) => Ordering::Greater,
+            Err(e) => {
+                err.get_or_insert(e);
+                Ordering::Equal
+            }
+        });
+        if let Some(e) = err {
+            return Err(e);
+        }
+        self.ordered = Some(words);
+        Ok(())
+    }
 }
 
 fn get_env(ev: &mut Evaluator, args: &[Word], pos: Pos) -> EvalResult<Word> {

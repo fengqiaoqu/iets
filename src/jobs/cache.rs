@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::mem;
+use std::sync::Arc;
 
 use super::line::{Job, Line, json_str, json_str_list};
 use crate::error::{Error, Result};
@@ -18,7 +19,7 @@ pub struct Resolver {
     conn: Connection,
     valid: HashMap<StorePath, bool>,
     probe: HashMap<StorePath, bool>,
-    drvs: HashMap<StorePath, Derivation>,
+    drvs: HashMap<StorePath, Arc<Derivation>>,
     wanted_valid: BTreeSet<StorePath>,
     wanted: BTreeSet<StorePath>,
     attempt_complete: bool,
@@ -163,12 +164,13 @@ impl Resolver {
         None
     }
 
-    fn read_derivation(&mut self, p: &StorePath) -> Result<&Derivation> {
+    /// Shared, since each probe round walks the closure again.
+    fn read_derivation(&mut self, p: &StorePath) -> Result<Arc<Derivation>> {
         if !self.drvs.contains_key(p) {
             let drv = load_derivation_from_store(p)?;
-            self.drvs.insert(p.clone(), drv);
+            self.drvs.insert(p.clone(), Arc::new(drv));
         }
-        Ok(&self.drvs[p])
+        Ok(self.drvs[p].clone())
     }
 
     /// The wanted (or all) output paths of `drv` that are not valid.
@@ -212,7 +214,7 @@ impl Resolver {
         if !t.visited.insert(drv_path.clone()) {
             return Ok(());
         }
-        let drv = self.read_derivation(drv_path)?.clone();
+        let drv = self.read_derivation(drv_path)?;
         let outputs = self.missing_outputs(&drv, wanted)?;
         if !outputs.known {
             return Ok(());

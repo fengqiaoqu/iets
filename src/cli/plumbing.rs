@@ -285,13 +285,14 @@ struct Roots {
 fn roots(args: &[String], stdin: bool, drvs: Option<PathBuf>) -> Roots {
     let mut drv_dir = drvs;
     let mut out: Vec<Target> = Vec::new();
+    let mut at: HashMap<StorePath, usize> = HashMap::new();
     let mut add = |drv: &str, output: Option<&str>| {
         let drv = StorePath::parse(drv)
             .unwrap_or_else(|e| arg_error(format!("'{drv}' is not a store path: {}", e.0)));
         let wanted: Vec<String> = (output.into_iter())
             .flat_map(|o| o.split(',').filter(|o| !o.is_empty()).map(String::from))
             .collect();
-        match out.iter_mut().find(|t| t.drv == drv) {
+        match at.get(&drv).map(|&i| &mut out[i]) {
             Some(t) => {
                 for o in wanted {
                     if !t.outputs.contains(&o) {
@@ -301,6 +302,7 @@ fn roots(args: &[String], stdin: bool, drvs: Option<PathBuf>) -> Roots {
             }
             None => {
                 let name = drv.name().to_string();
+                at.insert(drv.clone(), out.len());
                 out.push(Target::new(&name, drv, wanted));
             }
         }
