@@ -563,6 +563,18 @@ fn fallback_forced_from(env: &Env) -> Result<bool> {
     Ok(nix_fallback_var(env)? == Some(NixFallback::Always))
 }
 
+impl Settings {
+    /// What a forced fallback needs when the settings do not load: where
+    /// the real Nix is. From the environment alone, like the switch.
+    pub fn for_fallback() -> Settings {
+        Settings {
+            nix_bin_dir: Env(session_var).dir("IETS_NIX_BIN_DIR"),
+            nix_fallback: NixFallback::Always,
+            ..Settings::default()
+        }
+    }
+}
+
 fn nix_fallback_var(env: &Env) -> Result<Option<NixFallback>> {
     let Some(v) = env.str("IETS_NIX_FALLBACK") else {
         return Ok(None);

@@ -88,6 +88,44 @@ fn fallbacks() {
         broken.stdout == real.stdout && broken.status.code() == real.status.code(),
         stderr(&broken),
     );
+    // `iets nix-instantiate …` is the same command
+    let sub = s
+        .iets()
+        .env("IETS_NIX_BIN_DIR", &f.real)
+        .env("NIX_REMOTE", "daemon")
+        .env("IETS_NIX_FALLBACK", "always")
+        .env("IETS_WORKERS", "many")
+        .arg("nix-instantiate")
+        .args(native)
+        .output()
+        .unwrap();
+    c.check(
+        "IETS_NIX_FALLBACK=always runs the real nix-instantiate as an iets subcommand",
+        sub.stdout == real.stdout && sub.status.code() == real.status.code(),
+        stderr(&sub),
+    );
+    // with a broken setting the real nix still comes from IETS_NIX_BIN_DIR
+    let fake = s.dir().join("fakebin");
+    fs::create_dir(&fake).unwrap();
+    fs::write(fake.join("nix-instantiate"), "#!/bin/sh\necho FAKE\n").unwrap();
+    fs::set_permissions(
+        fake.join("nix-instantiate"),
+        fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let faked = f
+        .ours("nix-instantiate")
+        .env("IETS_NIX_BIN_DIR", &fake)
+        .env("IETS_NIX_FALLBACK", "always")
+        .env("IETS_WORKERS", "many")
+        .args(native)
+        .output()
+        .unwrap();
+    c.check(
+        "a broken setting keeps IETS_NIX_BIN_DIR for the forced fallback",
+        stdout(&faked).trim() == "FAKE",
+        format!("{}{}", stdout(&faked), stderr(&faked)),
+    );
     // the file sets it too, for an admin who turned the real nix off
     let toml = s.dir().join("xdg/iets/iets.toml");
     fs::create_dir_all(toml.parent().unwrap()).unwrap();
