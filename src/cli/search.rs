@@ -444,33 +444,49 @@ type Spans = Vec<(usize, usize)>;
 
 /// search.cc's match: every regex must match the attribute path, the pname or
 /// the description; an exclude regex that matches any of the three hides the
-/// package. The spans are what the text output highlights.
-fn matched(e: &Entry, res: &[Prog], exclude: &[Prog]) -> Option<(Spans, Spans)> {
-    let hit = |p: &Prog, s: &[u8]| regex::matches(p, s).next().is_some_and(|m| m.is_ok());
-    if exclude
-        .iter()
-        .any(|p| hit(p, &e.path) || hit(p, &e.pname) || hit(p, &e.desc))
-    {
-        return None;
+/// package. The spans are what the text output highlights. A pattern that
+/// runs out of steps is an error, not a miss.
+fn matched(
+    e: &Entry,
+    res: &[Prog],
+    exclude: &[Prog],
+    s: &Search,
+) -> Result<Option<(Spans, Spans)>, Box<Error>> {
+    fn first(p: &Prog, t: &[u8]) -> Result<bool, regex::TooComplex> {
+        regex::matches(p, t)
+            .next()
+            .map_or(Ok(false), |m| m.map(|_| true))
     }
-    let (mut paths, mut descs) = (Vec::new(), Vec::new());
-    for p in res {
-        let before = (paths.len(), descs.len());
-        paths.extend(
-            regex::matches(p, &e.path)
-                .map_while(Result::ok)
-                .map(|m| (m.start, m.end)),
-        );
-        descs.extend(
-            regex::matches(p, &e.desc)
-                .map_while(Result::ok)
-                .map(|m| (m.start, m.end)),
-        );
-        if (paths.len(), descs.len()) == before && !hit(p, &e.pname) {
-            return None;
+    fn spans(p: &Prog, t: &[u8]) -> Result<Spans, regex::TooComplex> {
+        regex::matches(p, t)
+            .map(|m| m.map(|m| (m.start, m.end)))
+            .collect()
+    }
+    let too_complex = |re: &String| {
+        Error::boxed(
+            K::Eval,
+            format!("the regular expression '{re}' backtracks too much on its input"),
+            Pos::NONE,
+        )
+    };
+    for (p, re) in exclude.iter().zip(&s.exclude) {
+        let hit = |t: &[u8]| first(p, t).map_err(|_| too_complex(re));
+        if hit(&e.path)? || hit(&e.pname)? || hit(&e.desc)? {
+            return Ok(None);
         }
     }
-    Some((paths, descs))
+    let (mut paths, mut descs) = (Vec::new(), Vec::new());
+    for (p, re) in res.iter().zip(&s.regexes) {
+        let before = (paths.len(), descs.len());
+        paths.extend(spans(p, &e.path).map_err(|_| too_complex(re))?);
+        descs.extend(spans(p, &e.desc).map_err(|_| too_complex(re))?);
+        if (paths.len(), descs.len()) == before
+            && !first(p, &e.pname).map_err(|_| too_complex(re))?
+        {
+            return Ok(None);
+        }
+    }
+    Ok(Some((paths, descs)))
 }
 
 /// hilite.cc:hiliteMatches: every match wrapped, continuous ones merged.
@@ -508,7 +524,7 @@ fn show_results(
     let mut json: BTreeMap<&[u8], &Entry> = BTreeMap::new();
     let mut results = 0;
     for e in index {
-        let Some((paths, descs)) = matched(e, res, exclude) else {
+        let Some((paths, descs)) = matched(e, res, exclude, s)? else {
             continue;
         };
         results += 1;
@@ -636,6 +652,22 @@ fn decode(b: &[u8]) -> Option<Vec<Entry>> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_pattern_out_of_steps_is_an_error_not_a_miss() {
+        let s = Search {
+            regexes: vec!["(a|a)*b".into()],
+            ..Search::default()
+        };
+        let res = compile_all(&s.regexes).unwrap();
+        let e = Entry {
+            path: b"x".to_vec(),
+            pname: b"x".to_vec(),
+            version: Vec::new(),
+            desc: b"a".repeat(50),
+        };
+        let err = matched(&e, &res, &[], &s).unwrap_err();
+        assert!(err.msg.contains("backtracks too much"), "{}", err.msg);
+    }
     #[test]
     fn drv_names() {
         let split = |s: &str| {

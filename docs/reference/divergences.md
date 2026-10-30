@@ -45,10 +45,20 @@ nix-eval-jobs) in place of the file.
 
 Nix compiles patterns with libstdc++ `std::regex` in `extended` (POSIX ERE)
 mode. iets has its own engine, written from the behavior Nix shows and
-the POSIX spec. No divergence is known: the matches, the capture groups, the
-accept/reject set and both error messages agree, including the
+the POSIX spec. The matches, the capture groups, the accept/reject set and
+both error messages agree, including the
 `memory limit exceeded by regular expression` limit (`a{99993}` compiles,
 `a{99994}` does not).
+
+One limit is iets's own. A match stops after
+`64 × (len + 1) × insts + 2^24` steps, where `len` is the length of the
+string and `insts` the size of the compiled pattern, and `builtins.match`,
+`builtins.split` and `iets search` then fail with "the regular expression
+'…' backtracks too much on its input". Nix has no such limit: `(a|a)*b` on
+a string of `a`s runs for as long as its exponential backtracking takes,
+or overflows the stack. The budget also stops a legitimate match whose
+backtracking is quadratic in its input, once the input is a few kilobytes
+long.
 
 ## `builtins.fromTOML`
 
