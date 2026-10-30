@@ -78,12 +78,12 @@ impl<'a> Farm<'a> {
         }
     }
 
-    /// The stderr of `name args` with IETS_NO_FALLBACK: why it would fall back.
+    /// The stderr of `name args` with IETS_NIX_FALLBACK=never: why it would fall back.
     pub fn reason(&self, name: &str, args: &[&str]) -> String {
         stderr(
             &self
                 .ours(name)
-                .env("IETS_NO_FALLBACK", "1")
+                .env("IETS_NIX_FALLBACK", "never")
                 .args(args)
                 .output()
                 .unwrap(),

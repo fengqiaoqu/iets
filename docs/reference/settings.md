@@ -50,7 +50,7 @@ prints cover every worker.
 | `IETS_IR_MIN` | | usize (bytes) | 1024 | Sources smaller than this compile faster than their cache entry loads, so they are not cached. |
 | `IETS_PROVENANCE` | `provenance` | Boolean | on | Rewrites store paths and positions back to local trees (`docs/explanation/provenance.md`). |
 | `IETS_NIX_BIN_DIR` | `nix-bin-dir` | path | unset | Where the real Nix binaries live. Unset: the first one on `PATH` that is not iets, where an iets classic mode command stands for the Nix it was built with (`docs/reference/classic.md`, **Fallback rules**). |
-| `IETS_NO_FALLBACK` | `no-fallback` | Boolean | off | A classic command fails instead of running the real Nix (`docs/reference/classic.md`). |
+| `IETS_NIX_FALLBACK` | `nix-fallback` | `auto`, `always` or `never` | `auto` | When a classic command runs the real Nix: for what iets does not handle, for every command, or not at all (`docs/reference/classic.md`). `always` from the environment is read before this file, so it works when a setting is broken. |
 | `IETS_FETCHING` | | set = on | off | Set on the Nix subprocess that fetches a flake input, so a recursive fetch is an error. |
 | `IETS_OFFLINE` | | set = on | off | Any download is an error. A flake whose inputs the input store already holds still evaluates. |
 | `IETS_COMPLETE_MS` | | u64 (ms) | 5000 | How long a completion that evaluates (`FLAKEREF#fragment`, `-A`) may take before it gives no candidates. `0` waits. A value that is not a number keeps the default. |
@@ -109,7 +109,7 @@ a table (`docs/reference/lints.md`).
 ```toml
 builder = "ssh-ng://buildhost"
 workers = 4
-no-fallback = true
+nix-fallback = "never"
 fix-hashes = "never"
 source-map = ["/nix/store/…-source=/home/me/nixpkgs"]
 
@@ -180,7 +180,7 @@ worth stopping for.
 | `cache-dir` | point the caches at a directory it ships, so a planted entry answers for an evaluation; or write the caches anywhere |
 | `source-map` | make errors, provenance and lint roots name local directories outside the clone |
 | `fetch-max-size` | lift the cap that stops a decompression bomb |
-| `no-fallback` | `false` brings back the real nix on a machine whose admin turned it off |
+| `nix-fallback` | `auto` or `always` brings back the real nix on a machine whose admin turned it off |
 | `shell-gc-root`, `build-gc-root` | pin closures on the disk, or let them go: the disk is the user's to budget |
 | `workers`, `fiber-stack-mb` | take every core, or reserve address space until the run fails |
 | `cache`, `provenance` | nothing worse than a slow run or plainer output, and nothing a project needs: the default is no |

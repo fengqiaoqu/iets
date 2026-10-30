@@ -20,7 +20,7 @@ use crate::eval::{self, EvalConfig, EvalResult, Evaluator, Pos};
 use crate::remote::worker::{Options, Transport, default_socket};
 use crate::runtime::Word;
 use crate::session::Session;
-use crate::settings::builders;
+use crate::settings::{NixFallback, builders};
 use crate::{api, argv, ignored, lint, log, nixbin};
 
 /// The command names iets answers to when it is installed as classic Nix.
@@ -35,6 +35,9 @@ pub const NAMES: &[&str] = &[
 /// Runs the classic command `name`. `argv` is everything after `argv[0]`.
 pub fn dispatch(name: &str, argv: &[String]) -> i32 {
     log::set_classic();
+    if Session::current().settings().nix_fallback == NixFallback::Always {
+        fallback(name, argv, "nix-fallback is always");
+    }
     match name {
         "nix-instantiate" => instantiate::main(argv),
         "nix-build" => build::main(argv),
@@ -44,12 +47,12 @@ pub fn dispatch(name: &str, argv: &[String]) -> i32 {
     }
 }
 
-/// Execs the real `name` with the same arguments. `IETS_NO_FALLBACK=1` makes
+/// Execs the real `name` with the same arguments. `nix-fallback = never` makes
 /// this an error instead, so a test can see which cases fall back.
 pub fn fallback(name: &str, argv: &[String], reason: &str) -> ! {
     log::line(&format!("iets: falling back to {name}: {reason}"));
-    if Session::current().settings().no_fallback {
-        log::line(&format!("iets: no-fallback is set, not running {name}"));
+    if Session::current().settings().nix_fallback == NixFallback::Never {
+        log::line(&format!("iets: nix-fallback is never, not running {name}"));
         exit(1)
     }
     let Some(real) = nixbin::real(name) else {

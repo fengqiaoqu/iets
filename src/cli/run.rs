@@ -66,6 +66,20 @@ pub fn dispatch(session: &Session, argv: Vec<String>, classic: Option<String>) -
             _ => {}
         }
     }
+    // the escape hatch needs nothing else of iets, not even the settings
+    // file: a broken setting is one reason to want the real nix
+    if let Some(name) = &classic {
+        match settings::fallback_forced() {
+            Ok(true) => {
+                log::set_classic();
+                // the settings still load: `nix-bin-dir` says what to run
+                let _ = session.load_settings(&options);
+                cli::classic::fallback(name, &argv, "IETS_NIX_FALLBACK is always");
+            }
+            Ok(false) => {}
+            Err(e) => return e.report(),
+        }
+    }
     if let Err(e) = session.load_settings(&options) {
         return e.report();
     }
