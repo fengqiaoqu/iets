@@ -2,6 +2,7 @@
 
 pub mod coerce;
 pub mod error;
+pub mod search_path;
 
 #[cfg(test)]
 mod tests;
@@ -1022,6 +1023,14 @@ impl Evaluator {
                 continue;
             }
             let suffix = &name[if sep { n + 1 } else { n }..];
+            if search_path::is_url(path) {
+                bail!(
+                    ErrorKind::Unsupported,
+                    pos,
+                    "the search path entry '{}' is a URL, which iets does not fetch",
+                    String::from_utf8_lossy(path)
+                );
+            }
             store_hooks::open(self, path, pos)?;
             let mut candidate = path.clone();
             if !suffix.is_empty() {

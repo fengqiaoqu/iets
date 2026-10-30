@@ -23,7 +23,7 @@ pub mod watch;
 use crate::builtins::text;
 use crate::compile::cache::IrCache;
 use crate::env::Env;
-use crate::eval::{self, Error, ErrorKind, EvalConfig, Evaluator, Pos};
+use crate::eval::{self, Error, ErrorKind, EvalConfig, Evaluator, Pos, search_path};
 use crate::flake::{eval_flake_value, parse_flake_ref, select_output};
 use crate::lint::{self, Level, Scope};
 use crate::provenance::{describe_pos, rewrite_msg};
@@ -170,10 +170,16 @@ pub enum Input {
     Flake(String),
 }
 
-/// A `-I prefix=path` (or `-I path`) entry as an absolute pair.
+/// A `-I prefix=path` (or `-I path`) entry as a pair: the path absolute, a
+/// URL as given.
 pub fn parse_include(s: &str) -> (Vec<u8>, Vec<u8>) {
     let (prefix, path) = s.split_once('=').unwrap_or(("", s));
-    (argv::bytes(prefix), abs_path(path, &cwd()))
+    let path = if search_path::is_url(path.as_bytes()) {
+        argv::bytes(path)
+    } else {
+        abs_path(path, &cwd())
+    };
+    (argv::bytes(prefix), path)
 }
 
 fn home() -> Option<Vec<u8>> {
@@ -414,7 +420,7 @@ pub fn abs_path(f: &str, cwd: &[u8]) -> Vec<u8> {
 }
 
 /// `-I` entries first, then `NIX_PATH`, then the `nix-path` setting of the
-/// nix.conf this run loaded, as absolute `(prefix, path)` pairs. Nix's channel
+/// nix.conf this run loaded, as `(prefix, path)` pairs. Nix's channel
 /// defaults are not here.
 pub fn full_includes(includes: &[(Vec<u8>, Vec<u8>)]) -> Vec<(Vec<u8>, Vec<u8>)> {
     let session = Session::current();
@@ -425,7 +431,7 @@ pub fn full_includes(includes: &[(Vec<u8>, Vec<u8>)]) -> Vec<(Vec<u8>, Vec<u8>)>
     let env = env::var("NIX_PATH").ok().filter(|_| !replaces);
     let env = env
         .iter()
-        .flat_map(|np| np.split(':'))
+        .flat_map(|np| search_path::split(np))
         .filter(|s| !s.is_empty());
     let mut all = includes.to_vec();
     all.extend(
@@ -581,5 +587,27 @@ mod tests {
         let none = key(None);
         assert_ne!(key(Some(b"/a")), key(Some(b"/b")));
         assert_ne!(key(Some(b"/a")), none);
+    }
+
+    /// A URL stays as given; `<name>` on it is unsupported, so a classic
+    /// command falls back to Nix, which fetches it.
+    #[test]
+    fn a_url_in_the_search_path_is_kept_and_unsupported() {
+        let (prefix, path) = parse_include("nixpkgs=flake:nixpkgs");
+        assert_eq!(
+            (prefix.as_slice(), path.as_slice()),
+            (b"nixpkgs".as_slice(), b"flake:nixpkgs".as_slice())
+        );
+        let (_, path) = parse_include("channel:nixos-unstable");
+        assert_eq!(path, b"channel:nixos-unstable");
+        assert!(parse_include("x").1.starts_with(b"/"));
+
+        let mut a = EvalArgs::new();
+        a.input = Some(Input::Expr("<nixpkgs>".into()));
+        a.includes = vec![parse_include("nixpkgs=flake:nixpkgs")];
+        a.pure = Some(false);
+        let (_, rc, log) = testkit::eval(a);
+        assert_ne!(rc, 0);
+        assert!(log.contains("'flake:nixpkgs' is a URL"), "{log}");
     }
 }
