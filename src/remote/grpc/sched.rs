@@ -18,6 +18,7 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use tonic::transport::Channel;
 
 use crate::error::{Error, Result};
+use crate::log;
 
 use super::health::Health;
 use super::proto::sched_msg::Msg;
@@ -106,15 +107,15 @@ impl Sched {
                 }
                 Some(Msg::Cached(_)) => return Ok(Answer::Cached),
                 Some(Msg::Unplaceable(u)) => {
+                    let why = log::plain(&u.reason);
                     if deadline.is_none() {
                         errln!(
-                            "{drv}: {}, waiting up to {}s for a worker",
-                            u.reason,
+                            "{drv}: {why}, waiting up to {}s for a worker",
                             self.grace.as_secs()
                         );
                         deadline = Some(Instant::now() + self.grace);
                     }
-                    reason = u.reason;
+                    reason = why;
                 }
                 Some(_) => {}
                 None => {

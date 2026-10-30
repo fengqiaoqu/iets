@@ -23,7 +23,7 @@ use crate::error::{self, Error, Result};
 use crate::log::{
     self, ACT_BUILD, ACT_BUILDS, LVL_INFO, RES_BUILD_LOG_LINE, RES_PROGRESS, RES_SET_PHASE,
 };
-use crate::store::path::StorePath;
+use crate::store::path::{StorePath, check_name};
 use wire::{Counting, FramedSink};
 
 /// What `SetOptions` sends (remote-store.cc:setOptions). `Default` is the
@@ -510,17 +510,35 @@ struct BuildCounts {
     act: Option<u64>,
     done: u64,
     failed: u64,
-    /// One entry per change: true for a success.
-    pending: VecDeque<bool>,
+    /// Runs of changes, true for successes: a count costs no memory.
+    pending: VecDeque<(bool, u64)>,
 }
 
 impl BuildCounts {
     fn progress(&mut self, fields: &[Value]) {
         let n = |i: usize| fields.get(i).and_then(Value::as_u64).unwrap_or(0);
         let (done, failed) = (n(0), n(3));
-        self.pending.extend((self.done..done).map(|_| true));
-        self.pending.extend((self.failed..failed).map(|_| false));
+        self.push(true, done.saturating_sub(self.done));
+        self.push(false, failed.saturating_sub(self.failed));
         (self.done, self.failed) = (done, failed);
+    }
+
+    fn push(&mut self, ok: bool, n: u64) {
+        match self.pending.back_mut() {
+            _ if n == 0 => {}
+            Some((last, k)) if *last == ok => *k = k.saturating_add(n),
+            _ => self.pending.push_back((ok, n)),
+        }
+    }
+
+    fn pop(&mut self) -> Option<bool> {
+        let (ok, k) = self.pending.front_mut()?;
+        let ok = *ok;
+        *k -= 1;
+        if *k == 0 {
+            self.pending.pop_front();
+        }
+        Some(ok)
     }
 }
 
@@ -541,7 +559,7 @@ mod counts_tests {
         assert!(c.pending.is_empty());
         c.progress(&p([0, 3, 2, 1]));
         c.progress(&p([1, 3, 1, 1]));
-        assert_eq!(c.pending, [false, true]);
+        assert_eq!([c.pop(), c.pop(), c.pop()], [Some(false), Some(true), None]);
     }
 
     #[test]
@@ -549,7 +567,14 @@ mod counts_tests {
         let mut c = BuildCounts::default();
         c.progress(&p([1, 3, 1, 0]));
         c.progress(&p([1, 3, 1, 0]));
-        assert_eq!(c.pending, [true]);
+        assert_eq!([c.pop(), c.pop()], [Some(true), None]);
+    }
+
+    #[test]
+    fn a_huge_count_is_one_run() {
+        let mut c = BuildCounts::default();
+        c.progress(&p([u64::MAX, 0, 0, 0]));
+        assert_eq!(c.pending, [(true, u64::MAX)]);
     }
 }
 
@@ -815,7 +840,7 @@ impl Connection {
                         // a build hook runs two activities for one build and
                         // the verdict belongs to the last
                         let last = !self.activities.values().any(|d| *d == drv);
-                        let built = last && self.builds.pending.pop_front() == Some(true);
+                        let built = last && self.builds.pop() == Some(true);
                         on_event(Event::Stopped(Stopped {
                             drv_path: drv,
                             built,
@@ -844,10 +869,7 @@ impl Connection {
                         && let Some(Value::String(phase)) = fields.first()
                         && let Some(drv) = self.build_of(act)
                     {
-                        on_event(Event::Phase(Phase {
-                            drv_path: drv,
-                            phase: phase.clone(),
-                        }));
+                        on_event(Event::Phase(Phase::remote(drv, phase)));
                     }
                 }
                 STDERR_ERROR => {
@@ -1088,6 +1110,15 @@ impl Connection {
         let mut map = BTreeMap::new();
         for _ in 0..n {
             let name = read_str(self.r())?;
+            // a name becomes part of an out link's file name
+            check_name(&name).map_err(|e| {
+                // escaped: a newline in it would forge a log line
+                Error::Protocol(format!(
+                    "the daemon named an output '{}': {}",
+                    name.escape_debug(),
+                    e.0.escape_debug()
+                ))
+            })?;
             let path = read_str(self.r())?;
             if path.is_empty() {
                 map.insert(name, None);
@@ -1097,7 +1128,8 @@ impl Connection {
             // to `nix build -o`: a store that says /etc/passwd is broken
             StorePath::parse(&path).map_err(|e| {
                 Error::Protocol(format!(
-                    "the daemon named an output that is not a store path: {e}"
+                    "the daemon named an output that is not a store path: {}",
+                    e.to_string().escape_debug()
                 ))
             })?;
             map.insert(name, Some(path));

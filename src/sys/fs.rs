@@ -15,6 +15,11 @@ use rustix::fs::{
 };
 use rustix::io::Errno;
 
+/// Whether `name`, which holds no `/`, names one entry of its directory.
+pub fn one_component(_name: &[u8]) -> bool {
+    true
+}
+
 /// Removes a symbolic link, whatever it points at.
 pub fn remove_link(p: &Path) -> io::Result<()> {
     fs::remove_file(p)

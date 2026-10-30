@@ -1,5 +1,5 @@
 use crate::sys::OsStrExt;
-use crate::sys::fs::{is_executable, make_executable, symlink};
+use crate::sys::fs::{self as sysfs, is_executable, make_executable, symlink};
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -840,7 +840,12 @@ fn parse_node(
 /// archive.cc:parse's checks of an entry name: well formed, and after the
 /// previous name of its directory, which it then replaces.
 fn next_name(name: &[u8], prev: &mut Vec<u8>) -> io::Result<()> {
-    if name.is_empty() || name == b"." || name == b".." || name.contains(&b'/') || name.contains(&0)
+    if name.is_empty()
+        || name == b"."
+        || name == b".."
+        || name.contains(&b'/')
+        || name.contains(&0)
+        || !sysfs::one_component(name)
     {
         return Err(bad_nar("bad entry name"));
     }

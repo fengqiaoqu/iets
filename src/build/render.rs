@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use super::event::{BuildEvent, Kind, fmt_duration};
 
-use crate::log::{interactive, json, note_mismatch, strip_ansi};
+use crate::log::{interactive, json, note_mismatch, plain, strip_ansi};
 use crate::store::path::find_store_prefix;
 use crate::sys::tty;
 
@@ -841,7 +841,7 @@ impl Renderer {
 /// The last log line, stripped so it cannot move the cursor.
 fn last_line(b: &Build) -> Option<String> {
     let l = b.lines.iter().rev().find(|l| !l.starts_with("@ phase "))?;
-    let clean: String = strip_ansi(l).chars().filter(|c| !c.is_control()).collect();
+    let clean = plain(l);
     let clean = clean.trim();
     (!clean.is_empty()).then(|| clean.to_string())
 }

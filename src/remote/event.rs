@@ -1,5 +1,7 @@
 //! What the daemon reports while it builds, decoded from the `STDERR_*` stream.
 
+use crate::log;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     Started(Started),
@@ -32,6 +34,16 @@ pub struct Failed {
 pub struct Phase {
     pub drv_path: String,
     pub phase: String,
+}
+
+impl Phase {
+    /// `phase` as a peer sent it, made [`log::plain`].
+    pub fn remote(drv_path: String, phase: &str) -> Phase {
+        Phase {
+            drv_path,
+            phase: log::plain(phase),
+        }
+    }
 }
 
 /// The build activity ended. `built` is true when the backend saw the build

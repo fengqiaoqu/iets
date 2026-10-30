@@ -531,11 +531,9 @@ fn try_build_derivation(
             // The call knows its derivation, so the phase is attributed the
             // way the daemon's `setPhase` result is.
             Some(proto::build_derivation_chunk::Event::Phase(phase)) => {
-                act.result(RES_SET_PHASE, vec![phase.as_str().into()]);
-                let _ = tx.send(Event::Phase(Phase {
-                    drv_path: drv.clone(),
-                    phase,
-                }));
+                let p = Phase::remote(drv.clone(), &phase);
+                act.result(RES_SET_PHASE, vec![p.phase.as_str().into()]);
+                let _ = tx.send(Event::Phase(p));
             }
             Some(proto::build_derivation_chunk::Event::Done(done)) => {
                 res = Some(
