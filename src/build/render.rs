@@ -153,10 +153,15 @@ impl Build {
 /// Takes the lines of the region.
 pub type Live = Box<dyn FnMut(Vec<String>) + Send>;
 
+/// Whether progress may be drawn now: the status board's answer, so
+/// `IETS_PROGRESS=false` covers the live region and the heartbeat too.
+pub type Shown = Box<dyn Fn() -> bool + Send>;
+
 pub struct Renderer {
     style: Style,
     out: Box<dyn Write + Send>,
     live: Option<Live>,
+    shown: Option<Shown>,
     began: Instant,
     last_draw: Instant,
     succeeded: usize,
@@ -192,6 +197,7 @@ impl Renderer {
             style,
             out,
             live: None,
+            shown: None,
             began: Instant::now(),
             last_draw: Instant::now(),
             succeeded: 0,
@@ -213,18 +219,33 @@ impl Renderer {
         self
     }
 
+    /// Draws progress only while `shown` says so.
+    pub fn with_shown(mut self, shown: Shown) -> Renderer {
+        self.shown = Some(shown);
+        self
+    }
+
+    fn shown(&self) -> bool {
+        self.shown.as_ref().is_none_or(|f| f())
+    }
+
     fn is_live(&self) -> bool {
         self.live.is_some() && self.style.mode == Mode::Tty && !self.style.quiet
     }
 
     /// How often `heartbeat` should run.
     pub fn interval(&self) -> Duration {
-        if self.is_live() { FRAME } else { HEARTBEAT }
+        if self.is_live() && self.shown() {
+            FRAME
+        } else {
+            HEARTBEAT
+        }
     }
 
     /// Log lines are throttled. A state change draws at once.
     fn redraw(&mut self, throttled: bool) {
-        if !self.is_live() || (throttled && self.last_draw.elapsed() < LOG_REDRAW) {
+        if !self.is_live() || !self.shown() || (throttled && self.last_draw.elapsed() < LOG_REDRAW)
+        {
             return;
         }
         self.last_draw = Instant::now();
@@ -751,7 +772,7 @@ impl Renderer {
             return;
         }
         self.check_stalls();
-        if self.running.is_empty() || self.style.quiet {
+        if self.running.is_empty() || self.style.quiet || !self.shown() {
             return;
         }
         let mut builds: Vec<(String, Duration, Option<String>, bool)> = self
@@ -1312,6 +1333,24 @@ pub(super) mod tests {
         assert!(text(&s).contains("⏵ 1 building: checks.x.a (0s, configure)"));
     }
 
+    /// `IETS_PROGRESS=false`: the board says no, so no live region on a
+    /// terminal and no `⏵` on a pipe; the log lines stay.
+    #[test]
+    fn without_progress_nothing_is_drawn() {
+        let (r, _, frames) = live();
+        let mut r = r.with_shown(Box::new(|| false));
+        r.event(&ev(Kind::Started));
+        r.heartbeat();
+        assert!(frames.lock().unwrap().iter().all(Vec::is_empty));
+        assert_eq!(r.interval(), HEARTBEAT);
+
+        let (r, s) = ci(false);
+        let mut r = r.with_shown(Box::new(|| false));
+        r.event(&ev(Kind::Started));
+        r.heartbeat();
+        assert!(!text(&s).contains("⏵"), "{}", text(&s));
+        assert!(text(&s).contains("checks.x.a"), "{}", text(&s));
+    }
     #[test]
     fn a_stalled_build_that_fails_still_shows_its_cause() {
         let (mut r, s) = ci(false);
