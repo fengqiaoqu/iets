@@ -19,7 +19,7 @@ use std::{env, mem, process};
 use serde_json::{Value, json};
 
 use crate::cli::help;
-use crate::display::{Display, Term, Tty};
+use crate::display::{Display, Size, Term, Tty, visible_width};
 use crate::eval::{Error, Pos};
 use crate::progress::{Board, Mode};
 use crate::session::Session;
@@ -63,6 +63,23 @@ struct Out {
     paused: usize,
     /// What was written without its newline, until it has one.
     partial: Vec<u8>,
+    /// The cursor after what went out since the display went down, for a
+    /// terminal that does not answer `cursor`.
+    landed: Option<(usize, usize)>,
+}
+
+/// Where the cursor is after `bytes` went out from column 1 of `row`.
+fn landing(bytes: &[u8], mut row: usize, (cols, rows): Size) -> (usize, usize) {
+    let mut col = 1;
+    for (i, line) in String::from_utf8_lossy(bytes).split('\n').enumerate() {
+        if i > 0 {
+            (row, col) = (row + 1, 1);
+        }
+        let w = visible_width(line.trim_end_matches('\r'));
+        row += w / cols;
+        col += w % cols;
+    }
+    (row.min(rows), col)
 }
 
 impl Out {
@@ -108,10 +125,11 @@ impl Out {
     fn sync(&mut self) {
         let wanted = self.paused == 0 && !self.live().is_empty() && self.w.is_some();
         let size = self.term().size().filter(|_| wanted);
+        let landed = self.landed.take();
         match (size, self.display.is_some()) {
             (Some(_), true) => self.paint(&[]),
             (Some((_, rows)), false) => {
-                let (row, col) = self.term().cursor().unwrap_or((rows, 1));
+                let (row, col) = self.term().cursor().or(landed).unwrap_or((rows, 1));
                 // a line somebody has not ended must not be drawn over
                 let origin = match col {
                     1 => row,
@@ -175,6 +193,23 @@ impl Log {
         let mut o = self.writer();
         o.region = lines;
         o.sync();
+    }
+
+    /// Runs `write`, which puts `bytes` on the display's terminal without
+    /// going through it: stdout on the same tty. The display goes down first
+    /// and comes back under the bytes, as at its start.
+    pub fn with_display_down<T>(&self, bytes: &[u8], write: impl FnOnce() -> T) -> T {
+        let mut o = self.writer();
+        let top = o.display.as_ref().map(Display::top);
+        let mut went = o.partial.clone();
+        o.close();
+        let r = write();
+        if let (Some(top), Some(size)) = (top, o.term().size()) {
+            went.extend_from_slice(bytes);
+            o.landed = Some(landing(&went, top, size));
+        }
+        o.sync();
+        r
     }
 
     /// Takes the live view down while a child may prompt on the terminal.
@@ -1119,6 +1154,7 @@ mod tests {
         emu: Arc<Mutex<Emu>>,
         size: Arc<Mutex<Option<Size>>>,
         guards: Arc<Mutex<Vec<usize>>>,
+        answers: Arc<AtomicBool>,
     }
 
     impl Write for Screen {
@@ -1136,6 +1172,9 @@ mod tests {
             *self.size.lock().unwrap()
         }
         fn cursor(&self) -> Option<(usize, usize)> {
+            if !self.answers.load(Ordering::Relaxed) {
+                return None;
+            }
             let (row, col) = self.emu.lock().unwrap().cursor();
             Some((row + 1, col + 1))
         }
@@ -1150,6 +1189,7 @@ mod tests {
                 emu: Arc::new(Mutex::new(Emu::new(rows, cols))),
                 size: Arc::new(Mutex::new(Some((cols, rows)))),
                 guards: Arc::default(),
+                answers: Arc::new(AtomicBool::new(true)),
             };
             let log = Log::default();
             log.write_to(Box::new(s.clone()));
@@ -1187,6 +1227,37 @@ mod tests {
         assert!(rows.contains(&"end".to_string()), "{rows:?}");
         // nothing is left to clear on a signal
         assert_eq!(s.guards.lock().unwrap().last(), Some(&0));
+    }
+
+    /// `iets eval --raw` on a cache miss (#279): the value has no newline
+    /// and lands on the region's top row. Without an answer to `cursor`
+    /// the region starts on the bottom row, and the newline under the value
+    /// scrolls the screen.
+    #[rstest::rstest]
+    fn stdout_under_the_region_stays_when_the_region_goes(#[values(true, false)] answers: bool) {
+        let (log, mut s) = Screen::log(40, 8);
+        s.answers.store(answers, Ordering::Relaxed);
+        log.set_region(vec!["evaluating".into()]);
+        let value = "/nix/store/x-a.drv";
+        log.with_display_down(value.as_bytes(), || s.write_all(value.as_bytes()))
+            .unwrap();
+        let rows = s.rows();
+        let at = rows.iter().position(|r| r == value).expect("the value");
+        assert_eq!(rows[at + 1], "evaluating", "{rows:?}");
+        log.set_region(Vec::new());
+        let rows = s.rows();
+        assert_eq!(rows[at], value, "{rows:?}");
+        assert!(!rows.contains(&"evaluating".to_string()), "{rows:?}");
+    }
+
+    #[test]
+    fn a_landing_counts_rows_lines_and_wraps() {
+        assert_eq!(landing(b"", 3, (10, 24)), (3, 1));
+        assert_eq!(landing(b"abc", 3, (10, 24)), (3, 4));
+        assert_eq!(landing(b"abc\n", 3, (10, 24)), (4, 1));
+        assert_eq!(landing(b"abc\r\nde\n", 3, (10, 24)), (5, 1));
+        assert_eq!(landing(b"0123456789abc", 3, (10, 24)), (4, 4));
+        assert_eq!(landing(b"a\nb\nc\n", 23, (10, 24)), (24, 1));
     }
 
     #[test]

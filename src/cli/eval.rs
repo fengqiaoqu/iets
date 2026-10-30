@@ -35,6 +35,7 @@ fn eval_and_print(ev: &mut Evaluator, a: EvalArgs, cache: Option<Cache>) -> i32 
     let evaluating = cli::evaluating(&a);
     let mut out: Vec<u8> = Vec::new();
     let r = cli::evaluate_each(ev, &a, |ev, v| {
+        let start = out.len();
         if raw {
             // nix eval --raw: coerce without copying to the store, no newline
             let mut ctx = Vec::new();
@@ -64,17 +65,14 @@ fn eval_and_print(ev: &mut Evaluator, a: EvalArgs, cache: Option<Cache>) -> i32 
         if !raw {
             out.push(b'\n');
         }
+        // each value goes out as it is made, as in nix-instantiate --eval
+        render::bytes(&out[start..]);
         Ok(())
     });
-    // Print after the activity ends. While it is up, Display::close erases from
-    // the region's top row with \x1b[J. --raw has no trailing newline, so the
-    // value sat on that row and was wiped on a cache miss (#279).
     drop(evaluating);
     if ev.session().settings().stats >= 1 {
         ev.print_stats();
     }
-    // Partial attrs still print when a later -A fails (eval_prints_every_attr).
-    render::bytes(&out);
     if let Err(e) = r {
         return report(ev, &e);
     }
