@@ -145,11 +145,13 @@ pub struct Reporter {
 
 impl Reporter {
     pub fn new(style: Style) -> Reporter {
-        let mut render = Renderer::new(style, Box::new(SessionOut::default()));
+        let s = Session::current();
+        let board = s.clone();
+        let mut render = Renderer::new(style, Box::new(SessionOut::default()))
+            .with_shown(Box::new(move || !board.log.progress.hidden()));
         let mut live = None;
         // under internal-json the activity records carry the progress
-        if style.mode == render::Mode::Tty && !style.quiet && style.progress && !log::json() {
-            let s = Session::current();
+        if style.mode == render::Mode::Tty && !style.quiet && !log::json() {
             s.log.progress.set_live(true);
             let sink = s.clone();
             render = render.with_live(Box::new(move |lines| sink.log.set_region(lines)));
@@ -888,7 +890,6 @@ mod tests {
             color: false,
             fold: false,
             quiet: false,
-            progress: true,
         };
         let mut d = Dispatcher::with_backend(
             Box::new(Fan {
@@ -1026,7 +1027,6 @@ mod tests {
             color: false,
             fold: false,
             quiet: false,
-            progress: true,
         };
         let mut d = Dispatcher::with_backend(
             Box::new(Stops),
@@ -1057,7 +1057,6 @@ mod tests {
             color: false,
             fold: false,
             quiet: false,
-            progress: true,
         };
         let mut d = Dispatcher::with_backend(
             Box::new(Fan {

@@ -63,7 +63,8 @@ pub struct Board {
     /// The build renderer draws the running builds itself, so the status
     /// line leaves them out.
     live: AtomicBool,
-    /// `IETS_PROGRESS=false`: the ticker draws nothing.
+    /// `IETS_PROGRESS=false`: nothing that only shows progress is drawn,
+    /// here or by the build renderer.
     hidden: AtomicBool,
     tasks: Mutex<Tasks>,
 }
@@ -83,6 +84,10 @@ impl Board {
 
     pub fn set_live(&self, on: bool) {
         self.live.store(on, Ordering::Relaxed);
+    }
+
+    pub fn hidden(&self) -> bool {
+        self.hidden.load(Ordering::Relaxed)
     }
 
     pub fn set_hidden(&self, on: bool) {
@@ -171,7 +176,7 @@ impl Board {
             t.ticking = false;
             return None;
         }
-        if self.hidden.load(Ordering::Relaxed) {
+        if self.hidden() {
             return Some(Tick::Quiet);
         }
         match self.mode() {
